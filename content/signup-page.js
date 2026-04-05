@@ -111,7 +111,7 @@ async function step3_fillEmailPassword(payload) {
     }
   }
 
-  fillInput(passwordInput, 'mimashisha0.0');
+  fillInput(passwordInput, payload.password || 'mimashisha0.0');
   log('Step 3: Password filled');
 
   // Report complete BEFORE submit, because submit causes page navigation

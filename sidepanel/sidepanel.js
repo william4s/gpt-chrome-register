@@ -301,7 +301,7 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_RESET': {
-      // Reset UI for next run (but keep buttons disabled since auto-run is still going)
+      // Full UI reset for next run
       displayOauthUrl.textContent = 'Waiting...';
       displayOauthUrl.classList.remove('has-value');
       displayLocalhostUrl.textContent = 'Waiting...';
@@ -309,6 +309,7 @@ chrome.runtime.onMessage.addListener((message) => {
       inputEmail.value = '';
       displayStatus.textContent = 'Ready';
       statusBar.className = 'status-bar';
+      logArea.innerHTML = '';
       document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
       updateProgressCounter();

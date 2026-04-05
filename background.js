@@ -16,7 +16,8 @@ const DEFAULT_STATE = {
   },
   oauthUrl: null,
   email: null,
-  password: 'mimashisha0.0',
+  password: null,
+  accounts: [], // { email, password, createdAt }
   lastEmailTimestamp: null,
   localhostUrl: null,
   flowStartTime: null,
@@ -38,8 +39,40 @@ async function setState(updates) {
 
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
+  // Preserve seenCodes and accounts across resets
+  const prev = await chrome.storage.session.get(['seenCodes', 'accounts']);
   await chrome.storage.session.clear();
-  await chrome.storage.session.set({ ...DEFAULT_STATE });
+  await chrome.storage.session.set({
+    ...DEFAULT_STATE,
+    seenCodes: prev.seenCodes || [],
+    accounts: prev.accounts || [],
+  });
+}
+
+/**
+ * Generate a random password: 14 chars, mix of uppercase, lowercase, digits, symbols.
+ */
+function generatePassword() {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghjkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%&*?';
+  const all = upper + lower + digits + symbols;
+
+  // Ensure at least one of each type
+  let pw = '';
+  pw += upper[Math.floor(Math.random() * upper.length)];
+  pw += lower[Math.floor(Math.random() * lower.length)];
+  pw += digits[Math.floor(Math.random() * digits.length)];
+  pw += symbols[Math.floor(Math.random() * symbols.length)];
+
+  // Fill remaining 10 chars
+  for (let i = 0; i < 10; i++) {
+    pw += all[Math.floor(Math.random() * all.length)];
+  }
+
+  // Shuffle
+  return pw.split('').sort(() => Math.random() - 0.5).join('');
 }
 
 // ============================================================
@@ -406,17 +439,18 @@ async function autoRunLoop(totalRuns) {
   for (let run = 1; run <= totalRuns; run++) {
     autoRunCurrentRun = run;
 
-    if (run > 1) {
-      // Reset state for next run (keep vpsUrl, mailProvider settings)
-      await addLog(`=== Resetting for run ${run}/${totalRuns} ===`, 'info');
-      const state = await getState();
-      const keepSettings = { vpsUrl: state.vpsUrl, mailProvider: state.mailProvider };
-      await resetState();
-      await setState(keepSettings);
-      // Broadcast reset to side panel
-      chrome.runtime.sendMessage({ type: 'AUTO_RUN_RESET' }).catch(() => {});
-      await new Promise(r => setTimeout(r, 1000));
-    }
+    // Reset everything at the start of each run (keep VPS/mail settings)
+    const prevState = await getState();
+    const keepSettings = {
+      vpsUrl: prevState.vpsUrl,
+      mailProvider: prevState.mailProvider,
+      autoRunning: true,
+    };
+    await resetState();
+    await setState(keepSettings);
+    // Tell side panel to reset all UI
+    chrome.runtime.sendMessage({ type: 'AUTO_RUN_RESET' }).catch(() => {});
+    await new Promise(r => setTimeout(r, 500));
 
     await addLog(`=== Auto Run ${run}/${totalRuns} — Phase 1: Get OAuth link & open signup ===`, 'info');
     const status = (phase) => ({ type: 'AUTO_RUN_STATUS', payload: { phase, currentRun: run, totalRuns } });
@@ -558,12 +592,22 @@ async function executeStep3(state) {
   if (!state.email) {
     throw new Error('No email address. Paste email in Side Panel first.');
   }
-  await addLog(`Step 3: Filling email ${state.email} and password`);
+
+  // Generate a unique password for this account
+  const password = generatePassword();
+  await setState({ password });
+
+  // Save account record
+  const accounts = state.accounts || [];
+  accounts.push({ email: state.email, password, createdAt: new Date().toISOString() });
+  await setState({ accounts });
+
+  await addLog(`Step 3: Filling email ${state.email}, password generated (${password.length} chars)`);
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 3,
     source: 'background',
-    payload: { email: state.email },
+    payload: { email: state.email, password },
   });
 }
 
@@ -673,7 +717,7 @@ async function executeStep6(state) {
     type: 'EXECUTE_STEP',
     step: 6,
     source: 'background',
-    payload: { email: state.email, password: state.password || 'mimashisha0.0' },
+    payload: { email: state.email, password: state.password },
   });
 }
 

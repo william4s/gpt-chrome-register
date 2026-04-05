@@ -17,8 +17,23 @@ if (!isTopFrame) {
   console.log(MAIL163_PREFIX, 'Skipping child frame');
 } else {
 
-// Track codes we've already seen across polls to avoid duplicates
-const seenCodes = new Set();
+// Track codes we've already seen — persisted in chrome.storage.session to survive script re-injection
+let seenCodes = new Set();
+
+// Load previously seen codes on startup
+(async () => {
+  try {
+    const data = await chrome.storage.session.get('seenCodes');
+    if (data.seenCodes && Array.isArray(data.seenCodes)) {
+      seenCodes = new Set(data.seenCodes);
+      console.log(MAIL163_PREFIX, `Loaded ${seenCodes.size} previously seen codes`);
+    }
+  } catch {}
+})();
+
+async function persistSeenCodes() {
+  await chrome.storage.session.set({ seenCodes: [...seenCodes] });
+}
 
 // ============================================================
 // Message Handler (top frame only)
@@ -130,11 +145,14 @@ async function handlePollEmail(step, payload) {
         const code = extractVerificationCode(subject + ' ' + ariaLabel);
         if (code && !seenCodes.has(code)) {
           seenCodes.add(code);
+          persistSeenCodes();
           const source = useFallback && existingMailIds.has(id) ? 'fallback' : 'new';
           log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
 
-          // Delete this email via right-click menu
+          // Delete this email via right-click menu, WAIT for it to finish before returning
           await deleteEmail(item, step);
+          // Extra wait to ensure deletion is processed
+          await sleep(1000);
 
           return { ok: true, code, emailTimestamp: Date.now(), mailId: id };
         } else if (code && seenCodes.has(code)) {
@@ -167,26 +185,36 @@ async function deleteEmail(item, step) {
     log(`Step ${step}: Deleting email...`);
 
     // Right-click on the mail item to trigger context menu
+    const rect = item.getBoundingClientRect();
     item.dispatchEvent(new MouseEvent('contextmenu', {
       bubbles: true, cancelable: true, button: 2,
-      clientX: item.getBoundingClientRect().x + 100,
-      clientY: item.getBoundingClientRect().y + 10,
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
     }));
 
-    await sleep(500);
-
-    // Find the context menu and click "删除邮件"
-    const menuItems = document.querySelectorAll('.nui-menu-item .nui-menu-item-text');
-    for (const menuItem of menuItems) {
-      if (menuItem.textContent.trim() === '删除邮件') {
-        menuItem.closest('.nui-menu-item').click();
-        log(`Step ${step}: Email deleted`, 'ok');
-        await sleep(500);
-        return;
+    // Wait for context menu to appear
+    let deleteMenuItem = null;
+    for (let i = 0; i < 10; i++) {
+      await sleep(300);
+      const menuItems = document.querySelectorAll('.nui-menu-item .nui-menu-item-text');
+      for (const mi of menuItems) {
+        if (mi.textContent.trim() === '删除邮件') {
+          deleteMenuItem = mi.closest('.nui-menu-item');
+          break;
+        }
       }
+      if (deleteMenuItem) break;
     }
 
-    log(`Step ${step}: Could not find "删除邮件" in context menu`, 'warn');
+    if (deleteMenuItem) {
+      deleteMenuItem.click();
+      log(`Step ${step}: Clicked "删除邮件"`, 'ok');
+      // Wait for the delete to process and item to disappear
+      await sleep(1000);
+      log(`Step ${step}: Email deleted successfully`);
+    } else {
+      log(`Step ${step}: Context menu "删除邮件" not found`, 'warn');
+    }
   } catch (err) {
     log(`Step ${step}: Failed to delete email: ${err.message}`, 'warn');
   }
