@@ -6,7 +6,8 @@ const STATUS_ICONS = {
   completed: '\u2713',  // ✓
   failed: '\u2717',     // ✗
   stopped: '\u25A0',    // ■
-  manual_completed: '手',
+  manual_completed: '跳',
+  skipped: '跳',
 };
 
 const logArea = document.getElementById('log-area');
@@ -46,7 +47,7 @@ const STEP_DEFAULT_STATUSES = {
   8: 'pending',
   9: 'pending',
 };
-const MANUAL_COMPLETION_STEPS = new Set([2, 3, 4, 5, 6, 7, 8]);
+const SKIPPABLE_STEPS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
 let latestState = null;
 let currentAutoRun = {
@@ -103,7 +104,7 @@ function dismissToast(toast) {
 }
 
 function isDoneStatus(status) {
-  return status === 'completed' || status === 'manual_completed';
+  return status === 'completed' || status === 'manual_completed' || status === 'skipped';
 }
 
 function getStepStatuses(state = latestState) {
@@ -282,13 +283,13 @@ function initializeManualStepActions() {
     manualBtn.type = 'button';
     manualBtn.className = 'step-manual-btn';
     manualBtn.dataset.step = String(step);
-    manualBtn.title = '标记此步已手动完成';
-    manualBtn.setAttribute('aria-label', `标记步骤 ${step} 已手动完成`);
+    manualBtn.title = '跳过此步';
+    manualBtn.setAttribute('aria-label', `跳过步骤 ${step}`);
     manualBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>';
     manualBtn.addEventListener('click', async (event) => {
       event.stopPropagation();
       try {
-        await handleManualComplete(step);
+        await handleSkipStep(step);
       } catch (err) {
         showToast(err.message, 'error');
       }
@@ -426,10 +427,10 @@ function updateButtonStates() {
     const currentStatus = statuses[step];
     const prevStatus = statuses[step - 1];
 
-    if (!MANUAL_COMPLETION_STEPS.has(step) || anyRunning || autoLocked || currentStatus === 'running' || isDoneStatus(currentStatus)) {
+    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || currentStatus === 'running' || isDoneStatus(currentStatus)) {
       btn.style.display = 'none';
       btn.disabled = true;
-      btn.title = '当前不可手动同步';
+      btn.title = '当前不可跳过';
       return;
     }
 
@@ -440,22 +441,9 @@ function updateButtonStates() {
       return;
     }
 
-    let disabledReason = '';
-    if (step === 3) {
-      if (!(latestState?.email || inputEmail.value.trim())) {
-        disabledReason = '请先填写邮箱';
-      } else if (!(latestState?.password || latestState?.customPassword || inputPassword.value)) {
-        disabledReason = '请先在侧边栏填写固定密码';
-      }
-    } else if (step === 6 && !(latestState?.email || inputEmail.value.trim())) {
-      disabledReason = '请先填写邮箱';
-    } else if (step === 8 && !latestState?.localhostUrl) {
-      disabledReason = '尚未捕获 localhost 回调地址';
-    }
-
     btn.style.display = '';
-    btn.disabled = Boolean(disabledReason);
-    btn.title = disabledReason || `将步骤 ${step} 标记为已手动完成`;
+    btn.disabled = false;
+    btn.title = `跳过步骤 ${step}`;
   });
 
   updateStopButtonState(anyRunning || isAutoRunPausedPhase() || autoLocked);
@@ -509,11 +497,11 @@ function updateStatusDisplay(state) {
     .sort((a, b) => b - a)[0];
 
   if (lastCompleted === 9) {
-    displayStatus.textContent = isDoneStatus(state.stepStatuses[9]) && state.stepStatuses[9] === 'manual_completed' ? '全部步骤已手动完成' : '全部步骤已完成';
+    displayStatus.textContent = (state.stepStatuses[9] === 'manual_completed' || state.stepStatuses[9] === 'skipped') ? '全部步骤已跳过/完成' : '全部步骤已完成';
     statusBar.classList.add('completed');
   } else if (lastCompleted) {
-    displayStatus.textContent = state.stepStatuses[lastCompleted] === 'manual_completed'
-      ? `步骤 ${lastCompleted} 已手动完成`
+    displayStatus.textContent = (state.stepStatuses[lastCompleted] === 'manual_completed' || state.stepStatuses[lastCompleted] === 'skipped')
+      ? `步骤 ${lastCompleted} 已跳过`
       : `步骤 ${lastCompleted} 已完成`;
   } else {
     displayStatus.textContent = '就绪';
@@ -602,27 +590,18 @@ async function maybeTakeoverAutoRun(actionLabel) {
   return true;
 }
 
-async function handleManualComplete(step) {
-  if (!(await maybeTakeoverAutoRun(`手动同步步骤 ${step}`))) {
+async function handleSkipStep(step) {
+  if (!(await maybeTakeoverAutoRun(`跳过步骤 ${step}`))) {
     return;
   }
 
-  if (step === 3 && inputPassword.value !== (latestState?.customPassword || '')) {
-    await chrome.runtime.sendMessage({
-      type: 'SAVE_SETTING',
-      source: 'sidepanel',
-      payload: { customPassword: inputPassword.value },
-    });
-    syncLatestState({ customPassword: inputPassword.value });
-  }
-
-  const confirmed = confirm(`这不会真正执行步骤 ${step}，只会将面板状态同步为“已手动完成”。请确认你已经在网页中手动完成该步骤。`);
+  const confirmed = confirm(`这不会真正执行步骤 ${step}，只会直接跳过该步骤并放行后续步骤。是否继续？`);
   if (!confirmed) {
     return;
   }
 
   const response = await chrome.runtime.sendMessage({
-    type: 'MARK_STEP_MANUAL_COMPLETE',
+    type: 'SKIP_STEP',
     source: 'sidepanel',
     payload: { step },
   });
@@ -631,7 +610,7 @@ async function handleManualComplete(step) {
     throw new Error(response.error);
   }
 
-  showToast(`步骤 ${step} 已同步为手动完成`, 'success', 2200);
+  showToast(`步骤 ${step} 已跳过`, 'success', 2200);
 }
 
 // ============================================================
@@ -839,7 +818,7 @@ chrome.runtime.onMessage.addListener((message) => {
         syncAutoRunState(state);
         updateStatusDisplay(latestState);
         updateButtonStates();
-        if (status === 'completed' || status === 'manual_completed') {
+        if (status === 'completed' || status === 'manual_completed' || status === 'skipped') {
           syncPasswordField(state);
           if (state.oauthUrl) {
             displayOauthUrl.textContent = state.oauthUrl;

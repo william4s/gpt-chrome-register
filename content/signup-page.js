@@ -11,7 +11,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     || message.type === 'STEP8_FIND_AND_CLICK'
     || message.type === 'PREPARE_LOGIN_CODE'
     || message.type === 'RESEND_VERIFICATION_CODE'
-    || message.type === 'GET_MANUAL_COMPLETION_STATE'
   ) {
     resetStopState();
     handleCommand(message).then((result) => {
@@ -20,11 +19,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (isStopError(err)) {
         log(`步骤 ${message.step || 8}：已被用户停止。`, 'warn');
         sendResponse({ stopped: true, error: err.message });
-        return;
-      }
-
-      if (message.type === 'GET_MANUAL_COMPLETION_STATE') {
-        sendResponse({ error: err.message });
         return;
       }
 
@@ -59,8 +53,6 @@ async function handleCommand(message) {
       return await prepareLoginCodeFlow();
     case 'RESEND_VERIFICATION_CODE':
       return await resendVerificationCode(message.step);
-    case 'GET_MANUAL_COMPLETION_STATE':
-      return getManualCompletionState();
     case 'STEP8_FIND_AND_CLICK':
       return await step8_findAndClick();
   }
@@ -146,25 +138,6 @@ function findOneTimeCodeLoginTrigger() {
       .trim();
 
     if (text && ONE_TIME_CODE_LOGIN_PATTERN.test(text)) {
-      return el;
-    }
-  }
-
-  return null;
-}
-
-function findRegisterEntryTrigger() {
-  const candidates = document.querySelectorAll(
-    'a, button, [role="button"], [role="link"], input[type="button"], input[type="submit"]'
-  );
-
-  for (const el of candidates) {
-    if (!isVisibleElement(el)) continue;
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-
-    const text = getActionText(el);
-    const href = el.getAttribute('href') || '';
-    if ((text && /sign\s*up|register|create\s*account|注册/i.test(text)) || /signup|register/i.test(href)) {
       return el;
     }
   }
@@ -421,18 +394,6 @@ function isStep5Ready() {
   );
 }
 
-function isCredentialsPageReady() {
-  const emailInput = document.querySelector(
-    'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email" i]'
-  );
-  if (emailInput && isVisibleElement(emailInput)) {
-    return true;
-  }
-
-  const passwordInput = document.querySelector('input[type="password"]');
-  return Boolean(passwordInput && isVisibleElement(passwordInput));
-}
-
 function getPageTextSnapshot() {
   return (document.body?.innerText || document.body?.textContent || '')
     .replace(/\s+/g, ' ')
@@ -482,28 +443,6 @@ function isStep8Ready() {
   return OAUTH_CONSENT_PAGE_PATTERN.test(getPageTextSnapshot());
 }
 
-function getManualCompletionState() {
-  if (isStep8Ready()) {
-    return { stage: 'consent', summary: '已进入 OAuth 授权同意页', url: location.href };
-  }
-  if (isAddPhonePageReady()) {
-    return { stage: 'add_phone', summary: '已进入手机号页面', url: location.href };
-  }
-  if (isStep5Ready()) {
-    return { stage: 'profile', summary: '已进入姓名/生日页面', url: location.href };
-  }
-  if (isVerificationPageStillVisible()) {
-    return { stage: 'verification', summary: '仍停留在验证码页面', url: location.href };
-  }
-  if (isCredentialsPageReady()) {
-    return { stage: 'credentials', summary: '已进入邮箱或密码输入页面', url: location.href };
-  }
-  if (findRegisterEntryTrigger()) {
-    return { stage: 'register', summary: '仍停留在注册入口页面', url: location.href };
-  }
-
-  return { stage: 'unknown', summary: '无法识别当前认证页状态', url: location.href };
-}
 
 async function waitForVerificationSubmitOutcome(step, timeout) {
   const resolvedTimeout = timeout ?? (step === 7 ? 30000 : 12000);

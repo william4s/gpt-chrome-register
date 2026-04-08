@@ -537,7 +537,7 @@ function isStopError(error) {
 }
 
 function isStepDoneStatus(status) {
-  return status === 'completed' || status === 'manual_completed';
+  return status === 'completed' || status === 'manual_completed' || status === 'skipped';
 }
 
 function clearStopRequest() {
@@ -595,136 +595,32 @@ async function ensureManualInteractionAllowed(actionLabel) {
   return state;
 }
 
-async function getSignupManualCompletionState() {
-  const signupTabId = await getTabId('signup-page');
-  if (!signupTabId) {
-    throw new Error('认证页标签页不存在，请先打开认证页并手动完成相应操作。');
-  }
-
-  const result = await sendToContentScript('signup-page', {
-    type: 'GET_MANUAL_COMPLETION_STATE',
-    source: 'background',
-    payload: {},
-  });
-
-  if (result?.error) {
-    throw new Error(result.error);
-  }
-
-  return result || {};
-}
-
-function ensureKnownPassword(state, step) {
-  const resolvedPassword = state.password || state.customPassword;
-  if (!resolvedPassword) {
-    throw new Error(`步骤 ${step} 需要已知密码，请先在侧边栏填写固定密码后再手动同步。`);
-  }
-  return resolvedPassword;
-}
-
-async function validateManualStepCompletion(step, state) {
-  switch (step) {
-    case 2: {
-      const authState = await getSignupManualCompletionState();
-      if (!['credentials', 'verification', 'profile', 'add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有进入注册流程后续页面，不能将步骤 2 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return {};
-    }
-
-    case 3: {
-      if (!state.email) {
-        throw new Error('步骤 3 需要邮箱地址，请先在侧边栏填写邮箱。');
-      }
-      const password = ensureKnownPassword(state, 3);
-      const authState = await getSignupManualCompletionState();
-      if (!['verification', 'profile', 'add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有离开邮箱/密码页面，不能将步骤 3 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return state.password ? {} : { stateUpdates: { password } };
-    }
-
-    case 4: {
-      const authState = await getSignupManualCompletionState();
-      if (!['profile', 'add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有进入验证码后的下一阶段，不能将步骤 4 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return {};
-    }
-
-    case 5: {
-      const authState = await getSignupManualCompletionState();
-      if (!['add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有离开姓名/生日页面，不能将步骤 5 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return {};
-    }
-
-    case 6: {
-      if (!state.email) {
-        throw new Error('步骤 6 需要已知邮箱地址，请先在侧边栏填写邮箱。');
-      }
-      const authState = await getSignupManualCompletionState();
-      if (!['verification', 'add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有进入登录后的下一阶段，不能将步骤 6 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return {};
-    }
-
-    case 7: {
-      const authState = await getSignupManualCompletionState();
-      if (!['add_phone', 'consent'].includes(authState.stage)) {
-        throw new Error(`认证页当前还没有离开登录验证码页面，不能将步骤 7 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
-      }
-      return {};
-    }
-
-    case 8: {
-      if (!state.localhostUrl) {
-        throw new Error('尚未捕获 localhost 回调地址，不能将步骤 8 标记为手动完成。');
-      }
-      return {};
-    }
-
-    default:
-      throw new Error(`步骤 ${step} 不支持手动完成同步。`);
-  }
-}
-
-async function markStepManualComplete(step) {
-  const state = await ensureManualInteractionAllowed('手动同步步骤');
+async function skipStep(step) {
+  const state = await ensureManualInteractionAllowed('跳过步骤');
 
   if (!Number.isInteger(step) || step < 1 || step > 9) {
     throw new Error(`无效步骤：${step}`);
-  }
-  if (step === 1 || step === 9) {
-    throw new Error(`步骤 ${step} 不支持手动完成同步。`);
   }
 
   const statuses = { ...(state.stepStatuses || {}) };
   const currentStatus = statuses[step];
   if (currentStatus === 'running') {
-    throw new Error(`步骤 ${step} 正在运行中，不能手动同步。`);
+    throw new Error(`步骤 ${step} 正在运行中，不能跳过。`);
   }
   if (isStepDoneStatus(currentStatus)) {
-    throw new Error(`步骤 ${step} 已完成，无需再手动同步。`);
+    throw new Error(`步骤 ${step} 已完成，无需再跳过。`);
   }
 
   if (step > 1) {
     const prevStatus = statuses[step - 1];
     if (!isStepDoneStatus(prevStatus)) {
-      throw new Error(`请先完成步骤 ${step - 1}，再同步步骤 ${step}。`);
+      throw new Error(`请先完成步骤 ${step - 1}，再跳过步骤 ${step}。`);
     }
   }
 
-  const validation = await validateManualStepCompletion(step, state);
-  if (validation?.stateUpdates) {
-    await setState(validation.stateUpdates);
-  }
-
-  await setStepStatus(step, 'manual_completed');
-  await addLog(`步骤 ${step} 已标记为手动完成`, 'warn');
-  return { ok: true, step, status: 'manual_completed' };
+  await setStepStatus(step, 'skipped');
+  await addLog(`步骤 ${step} 已跳过`, 'warn');
+  return { ok: true, step, status: 'skipped' };
 }
 
 function throwIfStopped() {
@@ -924,9 +820,9 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
-    case 'MARK_STEP_MANUAL_COMPLETE': {
+    case 'SKIP_STEP': {
       const step = Number(message.payload?.step);
-      return await markStepManualComplete(step);
+      return await skipStep(step);
     }
 
     case 'SAVE_SETTING': {
