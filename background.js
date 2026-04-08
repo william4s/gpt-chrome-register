@@ -35,6 +35,11 @@ const DEFAULT_STATE = {
   vpsPassword: '',
   customPassword: '',
   autoRunSkipFailures: false,
+  autoRunning: false,
+  autoRunPhase: 'idle',
+  autoRunCurrentRun: 0,
+  autoRunTotalRuns: 1,
+  autoRunAttemptRun: 0,
   mailProvider: '163', // 'qq' or '163'
   inbucketHost: '',
   inbucketMailbox: '',
@@ -425,8 +430,195 @@ function isStopError(error) {
   return message === STOP_ERROR_MESSAGE;
 }
 
+function isStepDoneStatus(status) {
+  return status === 'completed' || status === 'manual_completed';
+}
+
 function clearStopRequest() {
   stopRequested = false;
+}
+
+function getAutoRunStatusPayload(phase, payload = {}) {
+  const currentRun = payload.currentRun ?? autoRunCurrentRun;
+  const totalRuns = payload.totalRuns ?? autoRunTotalRuns;
+  const attemptRun = payload.attemptRun ?? autoRunAttemptRun;
+  const autoRunning = phase === 'running' || phase === 'waiting_email' || phase === 'retrying';
+
+  return {
+    autoRunning,
+    autoRunPhase: phase,
+    autoRunCurrentRun: currentRun,
+    autoRunTotalRuns: totalRuns,
+    autoRunAttemptRun: attemptRun,
+  };
+}
+
+async function broadcastAutoRunStatus(phase, payload = {}) {
+  const statusPayload = {
+    phase,
+    currentRun: payload.currentRun ?? autoRunCurrentRun,
+    totalRuns: payload.totalRuns ?? autoRunTotalRuns,
+    attemptRun: payload.attemptRun ?? autoRunAttemptRun,
+  };
+
+  await setState(getAutoRunStatusPayload(phase, statusPayload));
+  chrome.runtime.sendMessage({
+    type: 'AUTO_RUN_STATUS',
+    payload: statusPayload,
+  }).catch(() => {});
+}
+
+function isAutoRunLockedState(state) {
+  return Boolean(state.autoRunning) && (state.autoRunPhase === 'running' || state.autoRunPhase === 'retrying');
+}
+
+function isAutoRunPausedState(state) {
+  return Boolean(state.autoRunning) && state.autoRunPhase === 'waiting_email';
+}
+
+async function ensureManualInteractionAllowed(actionLabel) {
+  const state = await getState();
+
+  if (isAutoRunLockedState(state)) {
+    throw new Error(`自动流程运行中，请先停止后再${actionLabel}。`);
+  }
+  if (isAutoRunPausedState(state)) {
+    throw new Error(`自动流程当前已暂停。请点击“继续”，或先确认接管自动流程后再${actionLabel}。`);
+  }
+
+  return state;
+}
+
+async function getSignupManualCompletionState() {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw new Error('认证页标签页不存在，请先打开认证页并手动完成相应操作。');
+  }
+
+  const result = await sendToContentScript('signup-page', {
+    type: 'GET_MANUAL_COMPLETION_STATE',
+    source: 'background',
+    payload: {},
+  });
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  return result || {};
+}
+
+function ensureKnownPassword(state, step) {
+  const resolvedPassword = state.password || state.customPassword;
+  if (!resolvedPassword) {
+    throw new Error(`步骤 ${step} 需要已知密码，请先在侧边栏填写固定密码后再手动同步。`);
+  }
+  return resolvedPassword;
+}
+
+async function validateManualStepCompletion(step, state) {
+  switch (step) {
+    case 2: {
+      const authState = await getSignupManualCompletionState();
+      if (!['credentials', 'verification', 'profile', 'add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有进入注册流程后续页面，不能将步骤 2 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return {};
+    }
+
+    case 3: {
+      if (!state.email) {
+        throw new Error('步骤 3 需要邮箱地址，请先在侧边栏填写邮箱。');
+      }
+      const password = ensureKnownPassword(state, 3);
+      const authState = await getSignupManualCompletionState();
+      if (!['verification', 'profile', 'add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有离开邮箱/密码页面，不能将步骤 3 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return state.password ? {} : { stateUpdates: { password } };
+    }
+
+    case 4: {
+      const authState = await getSignupManualCompletionState();
+      if (!['profile', 'add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有进入验证码后的下一阶段，不能将步骤 4 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return {};
+    }
+
+    case 5: {
+      const authState = await getSignupManualCompletionState();
+      if (!['add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有离开姓名/生日页面，不能将步骤 5 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return {};
+    }
+
+    case 6: {
+      if (!state.email) {
+        throw new Error('步骤 6 需要已知邮箱地址，请先在侧边栏填写邮箱。');
+      }
+      const authState = await getSignupManualCompletionState();
+      if (!['verification', 'add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有进入登录后的下一阶段，不能将步骤 6 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return {};
+    }
+
+    case 7: {
+      const authState = await getSignupManualCompletionState();
+      if (!['add_phone', 'consent'].includes(authState.stage)) {
+        throw new Error(`认证页当前还没有离开登录验证码页面，不能将步骤 7 标记为手动完成。当前状态：${authState.summary || authState.stage || '未知'}`);
+      }
+      return {};
+    }
+
+    case 8: {
+      if (!state.localhostUrl) {
+        throw new Error('尚未捕获 localhost 回调地址，不能将步骤 8 标记为手动完成。');
+      }
+      return {};
+    }
+
+    default:
+      throw new Error(`步骤 ${step} 不支持手动完成同步。`);
+  }
+}
+
+async function markStepManualComplete(step) {
+  const state = await ensureManualInteractionAllowed('手动同步步骤');
+
+  if (!Number.isInteger(step) || step < 1 || step > 9) {
+    throw new Error(`无效步骤：${step}`);
+  }
+  if (step === 1 || step === 9) {
+    throw new Error(`步骤 ${step} 不支持手动完成同步。`);
+  }
+
+  const statuses = { ...(state.stepStatuses || {}) };
+  const currentStatus = statuses[step];
+  if (currentStatus === 'running') {
+    throw new Error(`步骤 ${step} 正在运行中，不能手动同步。`);
+  }
+  if (isStepDoneStatus(currentStatus)) {
+    throw new Error(`步骤 ${step} 已完成，无需再手动同步。`);
+  }
+
+  if (step > 1) {
+    const prevStatus = statuses[step - 1];
+    if (!isStepDoneStatus(prevStatus)) {
+      throw new Error(`请先完成步骤 ${step - 1}，再同步步骤 ${step}。`);
+    }
+  }
+
+  const validation = await validateManualStepCompletion(step, state);
+  if (validation?.stateUpdates) {
+    await setState(validation.stateUpdates);
+  }
+
+  await setStepStatus(step, 'manual_completed');
+  await addLog(`步骤 ${step} 已标记为手动完成`, 'warn');
+  return { ok: true, step, status: 'manual_completed' };
 }
 
 function throwIfStopped() {
@@ -590,6 +782,9 @@ async function handleMessage(message, sender) {
 
     case 'EXECUTE_STEP': {
       clearStopRequest();
+      if (message.source === 'sidepanel') {
+        await ensureManualInteractionAllowed('手动执行步骤');
+      }
       const step = message.payload.step;
       // Save email if provided (from side panel step 3)
       if (message.payload.email) {
@@ -617,6 +812,17 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
+    case 'TAKEOVER_AUTO_RUN': {
+      await requestStop({ logMessage: '已确认手动接管，正在停止自动流程并切换为手动控制...' });
+      await addLog('自动流程已切换为手动控制。', 'warn');
+      return { ok: true };
+    }
+
+    case 'MARK_STEP_MANUAL_COMPLETE': {
+      const step = Number(message.payload?.step);
+      return await markStepManualComplete(step);
+    }
+
     case 'SAVE_SETTING': {
       const updates = {};
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
@@ -632,12 +838,20 @@ async function handleMessage(message, sender) {
 
     // Side panel data updates
     case 'SAVE_EMAIL': {
+      const state = await getState();
+      if (isAutoRunLockedState(state)) {
+        throw new Error('自动流程运行中，当前不能手动修改邮箱。');
+      }
       await setEmailState(message.payload.email);
       return { ok: true, email: message.payload.email };
     }
 
     case 'FETCH_DUCK_EMAIL': {
       clearStopRequest();
+      const state = await getState();
+      if (isAutoRunLockedState(state)) {
+        throw new Error('自动流程运行中，当前不能手动获取 Duck 邮箱。');
+      }
       const email = await fetchDuckEmail(message.payload || {});
       return { ok: true, email };
     }
@@ -737,7 +951,8 @@ async function markRunningStepsStopped() {
   }
 }
 
-async function requestStop() {
+async function requestStop(options = {}) {
+  const { logMessage = '已收到停止请求，正在取消当前操作...' } = options;
   if (stopRequested) return;
 
   stopRequested = true;
@@ -747,7 +962,7 @@ async function requestStop() {
     webNavListener = null;
   }
 
-  await addLog('已收到停止请求，正在取消当前操作...', 'warn');
+  await addLog(logMessage, 'warn');
   await broadcastStopToContentScripts();
 
   for (const waiter of stepWaiters.values()) {
@@ -762,11 +977,11 @@ async function requestStop() {
 
   await markRunningStepsStopped();
   autoRunActive = false;
-  await setState({ autoRunning: false });
-  chrome.runtime.sendMessage({
-    type: 'AUTO_RUN_STATUS',
-    payload: { phase: 'stopped', currentRun: autoRunCurrentRun, totalRuns: autoRunTotalRuns },
-  }).catch(() => {});
+  await broadcastAutoRunStatus('stopped', {
+    currentRun: autoRunCurrentRun,
+    totalRuns: autoRunTotalRuns,
+    attemptRun: autoRunAttemptRun,
+  });
 }
 
 // ============================================================
@@ -861,6 +1076,7 @@ async function fetchDuckEmail(options = {}) {
 let autoRunActive = false;
 let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
+let autoRunAttemptRun = 0;
 
 // Outer loop: keep retrying until the target number of successful runs is reached.
 async function autoRunLoop(totalRuns, options = {}) {
@@ -872,18 +1088,24 @@ async function autoRunLoop(totalRuns, options = {}) {
   clearStopRequest();
   autoRunActive = true;
   autoRunTotalRuns = totalRuns;
+  autoRunCurrentRun = 0;
+  autoRunAttemptRun = 0;
   const autoRunSkipFailures = Boolean(options.autoRunSkipFailures);
   const maxAttempts = autoRunSkipFailures ? Math.max(totalRuns * 10, totalRuns + 20) : totalRuns;
   let successfulRuns = 0;
   let attemptRuns = 0;
   let forceFreshTabsNextRun = false;
 
-  await setState({ autoRunning: true, autoRunSkipFailures });
+  await setState({
+    autoRunSkipFailures,
+    ...getAutoRunStatusPayload('running', { currentRun: 0, totalRuns, attemptRun: 0 }),
+  });
 
   while (successfulRuns < totalRuns && attemptRuns < maxAttempts) {
     attemptRuns += 1;
     const targetRun = successfulRuns + 1;
     autoRunCurrentRun = targetRun;
+    autoRunAttemptRun = attemptRuns;
 
     // Reset everything at the start of each attempt (keep user settings).
     const prevState = await getState();
@@ -895,7 +1117,7 @@ async function autoRunLoop(totalRuns, options = {}) {
       mailProvider: prevState.mailProvider,
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
-      autoRunning: true,
+      ...getAutoRunStatusPayload('running', { currentRun: targetRun, totalRuns, attemptRun: attemptRuns }),
       ...(forceFreshTabsNextRun ? { tabRegistry: {} } : {}),
     };
     await resetState();
@@ -908,16 +1130,15 @@ async function autoRunLoop(totalRuns, options = {}) {
       forceFreshTabsNextRun = false;
     }
 
-    const status = (phase) => ({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase, currentRun: targetRun, totalRuns, attemptRun: attemptRuns },
-    });
-
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：第 ${attemptRuns} 次尝试，阶段 1，获取 OAuth 链接并打开注册页 ===`, 'info');
+      await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：第 ${attemptRuns} 次尝试，阶段 1，获取 OAuth 链接并打开注册页 ===`, 'info');
 
     try {
       throwIfStopped();
-      chrome.runtime.sendMessage(status('running')).catch(() => {});
+      await broadcastAutoRunStatus('running', {
+        currentRun: targetRun,
+        totalRuns,
+        attemptRun: attemptRuns,
+      });
 
       await executeStepAndWait(1, 2000);
       await executeStepAndWait(2, 2000);
@@ -933,7 +1154,11 @@ async function autoRunLoop(totalRuns, options = {}) {
 
       if (!emailReady) {
         await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮已暂停：请先获取 Duck 邮箱或手动粘贴邮箱，然后继续 ===`, 'warn');
-        chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
+        await broadcastAutoRunStatus('waiting_email', {
+          currentRun: targetRun,
+          totalRuns,
+          attemptRun: attemptRuns,
+        });
 
         await waitForResume();
 
@@ -944,7 +1169,11 @@ async function autoRunLoop(totalRuns, options = {}) {
       }
 
       await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：阶段 2，注册、验证、登录并完成授权（第 ${attemptRuns} 次尝试）===`, 'info');
-      chrome.runtime.sendMessage(status('running')).catch(() => {});
+      await broadcastAutoRunStatus('running', {
+        currentRun: targetRun,
+        totalRuns,
+        attemptRun: attemptRuns,
+      });
 
       const signupTabId = await getTabId('signup-page');
       if (signupTabId) {
@@ -966,13 +1195,21 @@ async function autoRunLoop(totalRuns, options = {}) {
     } catch (err) {
       if (isStopError(err)) {
         await addLog(`目标 ${targetRun}/${totalRuns} 轮已被用户停止`, 'warn');
-        chrome.runtime.sendMessage(status('stopped')).catch(() => {});
+        await broadcastAutoRunStatus('stopped', {
+          currentRun: targetRun,
+          totalRuns,
+          attemptRun: attemptRuns,
+        });
         break;
       }
 
       if (!autoRunSkipFailures) {
         await addLog(`目标 ${targetRun}/${totalRuns} 轮失败：${err.message}`, 'error');
-        chrome.runtime.sendMessage(status('stopped')).catch(() => {});
+        await broadcastAutoRunStatus('stopped', {
+          currentRun: targetRun,
+          totalRuns,
+          attemptRun: attemptRuns,
+        });
         break;
       }
 
@@ -980,38 +1217,51 @@ async function autoRunLoop(totalRuns, options = {}) {
       await addLog('兜底开关已开启：将放弃当前线程，重新开一轮继续补足目标次数。', 'warn');
       cancelPendingCommands('当前尝试已放弃。');
       await broadcastStopToContentScripts();
-      chrome.runtime.sendMessage(status('retrying')).catch(() => {});
+      await broadcastAutoRunStatus('retrying', {
+        currentRun: targetRun,
+        totalRuns,
+        attemptRun: attemptRuns,
+      });
       forceFreshTabsNextRun = true;
     }
   }
 
   if (!stopRequested && autoRunSkipFailures && successfulRuns < totalRuns && attemptRuns >= maxAttempts) {
     await addLog(`已达到安全重试上限（${attemptRuns} 次尝试），当前仅完成 ${successfulRuns}/${totalRuns} 轮。`, 'error');
-    chrome.runtime.sendMessage({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase: 'stopped', currentRun: successfulRuns, totalRuns: autoRunTotalRuns, attemptRun: attemptRuns },
-    }).catch(() => {});
+    await broadcastAutoRunStatus('stopped', {
+      currentRun: successfulRuns,
+      totalRuns: autoRunTotalRuns,
+      attemptRun: attemptRuns,
+    });
   } else if (stopRequested) {
     await addLog(`=== 已停止，完成 ${successfulRuns}/${autoRunTotalRuns} 轮，共尝试 ${attemptRuns} 次 ===`, 'warn');
-    chrome.runtime.sendMessage({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase: 'stopped', currentRun: successfulRuns, totalRuns: autoRunTotalRuns, attemptRun: attemptRuns },
-    }).catch(() => {});
+    await broadcastAutoRunStatus('stopped', {
+      currentRun: successfulRuns,
+      totalRuns: autoRunTotalRuns,
+      attemptRun: attemptRuns,
+    });
   } else if (successfulRuns >= autoRunTotalRuns) {
     await addLog(`=== 全部 ${autoRunTotalRuns} 轮均已成功完成，共尝试 ${attemptRuns} 次 ===`, 'ok');
-    chrome.runtime.sendMessage({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase: 'complete', currentRun: successfulRuns, totalRuns: autoRunTotalRuns, attemptRun: attemptRuns },
-    }).catch(() => {});
+    await broadcastAutoRunStatus('complete', {
+      currentRun: successfulRuns,
+      totalRuns: autoRunTotalRuns,
+      attemptRun: attemptRuns,
+    });
   } else {
     await addLog(`=== 已停止，完成 ${successfulRuns}/${autoRunTotalRuns} 轮，共尝试 ${attemptRuns} 次 ===`, 'warn');
-    chrome.runtime.sendMessage({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase: 'stopped', currentRun: successfulRuns, totalRuns: autoRunTotalRuns, attemptRun: attemptRuns },
-    }).catch(() => {});
+    await broadcastAutoRunStatus('stopped', {
+      currentRun: successfulRuns,
+      totalRuns: autoRunTotalRuns,
+      attemptRun: attemptRuns,
+    });
   }
   autoRunActive = false;
-  await setState({ autoRunning: false });
+  autoRunAttemptRun = attemptRuns;
+  await setState(getAutoRunStatusPayload(stopRequested ? 'stopped' : (successfulRuns >= autoRunTotalRuns ? 'complete' : 'stopped'), {
+    currentRun: successfulRuns,
+    totalRuns: autoRunTotalRuns,
+    attemptRun: attemptRuns,
+  }));
   clearStopRequest();
 }
 

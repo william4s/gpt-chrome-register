@@ -6,6 +6,7 @@ const STATUS_ICONS = {
   completed: '\u2713',  // ✓
   failed: '\u2717',     // ✗
   stopped: '\u25A0',    // ■
+  manual_completed: '手',
 };
 
 const logArea = document.getElementById('log-area');
@@ -33,6 +34,27 @@ const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
 const inputRunCount = document.getElementById('input-run-count');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
+const STEP_DEFAULT_STATUSES = {
+  1: 'pending',
+  2: 'pending',
+  3: 'pending',
+  4: 'pending',
+  5: 'pending',
+  6: 'pending',
+  7: 'pending',
+  8: 'pending',
+  9: 'pending',
+};
+const MANUAL_COMPLETION_STEPS = new Set([2, 3, 4, 5, 6, 7, 8]);
+
+let latestState = null;
+let currentAutoRun = {
+  autoRunning: false,
+  phase: 'idle',
+  currentRun: 0,
+  totalRuns: 1,
+  attemptRun: 0,
+};
 
 // ============================================================
 // Toast Notifications
@@ -73,6 +95,133 @@ function dismissToast(toast) {
   toast.addEventListener('animationend', () => toast.remove());
 }
 
+function isDoneStatus(status) {
+  return status === 'completed' || status === 'manual_completed';
+}
+
+function getStepStatuses(state = latestState) {
+  return { ...STEP_DEFAULT_STATUSES, ...(state?.stepStatuses || {}) };
+}
+
+function syncLatestState(nextState) {
+  const mergedStepStatuses = nextState?.stepStatuses
+    ? { ...STEP_DEFAULT_STATUSES, ...(latestState?.stepStatuses || {}), ...nextState.stepStatuses }
+    : getStepStatuses(latestState);
+
+  latestState = {
+    ...(latestState || {}),
+    ...(nextState || {}),
+    stepStatuses: mergedStepStatuses,
+  };
+}
+
+function syncAutoRunState(source = {}) {
+  const phase = source.autoRunPhase ?? source.phase ?? currentAutoRun.phase;
+  const autoRunning = source.autoRunning !== undefined
+    ? Boolean(source.autoRunning)
+    : (source.autoRunPhase !== undefined || source.phase !== undefined
+      ? ['running', 'waiting_email', 'retrying'].includes(phase)
+      : currentAutoRun.autoRunning);
+
+  currentAutoRun = {
+    autoRunning,
+    phase,
+    currentRun: source.autoRunCurrentRun ?? source.currentRun ?? currentAutoRun.currentRun,
+    totalRuns: source.autoRunTotalRuns ?? source.totalRuns ?? currentAutoRun.totalRuns,
+    attemptRun: source.autoRunAttemptRun ?? source.attemptRun ?? currentAutoRun.attemptRun,
+  };
+}
+
+function isAutoRunLockedPhase() {
+  return currentAutoRun.phase === 'running' || currentAutoRun.phase === 'retrying';
+}
+
+function isAutoRunPausedPhase() {
+  return currentAutoRun.phase === 'waiting_email';
+}
+
+function getAutoRunLabel(payload = currentAutoRun) {
+  const attemptLabel = payload.attemptRun ? ` · 尝试${payload.attemptRun}` : '';
+  if ((payload.totalRuns || 1) > 1) {
+    return ` (${payload.currentRun}/${payload.totalRuns}${attemptLabel})`;
+  }
+  return attemptLabel ? ` (${attemptLabel.slice(3)})` : '';
+}
+
+function setDefaultAutoRunButton() {
+  btnAutoRun.disabled = false;
+  inputRunCount.disabled = false;
+  btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
+}
+
+function applyAutoRunStatus(payload = currentAutoRun) {
+  syncAutoRunState(payload);
+  const runLabel = getAutoRunLabel(currentAutoRun);
+  const locked = isAutoRunLockedPhase();
+  const paused = isAutoRunPausedPhase();
+
+  inputRunCount.disabled = currentAutoRun.autoRunning;
+  btnAutoRun.disabled = currentAutoRun.autoRunning;
+  btnFetchEmail.disabled = locked;
+  inputEmail.disabled = locked;
+
+  switch (currentAutoRun.phase) {
+    case 'waiting_email':
+      autoContinueBar.style.display = 'flex';
+      btnAutoRun.innerHTML = `已暂停${runLabel}`;
+      break;
+    case 'running':
+      autoContinueBar.style.display = 'none';
+      btnAutoRun.innerHTML = `运行中${runLabel}`;
+      break;
+    case 'retrying':
+      autoContinueBar.style.display = 'none';
+      btnAutoRun.innerHTML = `重试中${runLabel}`;
+      break;
+    default:
+      autoContinueBar.style.display = 'none';
+      setDefaultAutoRunButton();
+      inputEmail.disabled = false;
+      if (!locked) {
+        btnFetchEmail.disabled = false;
+      }
+      break;
+  }
+
+  updateStopButtonState(paused || locked || Object.values(getStepStatuses()).some(status => status === 'running'));
+}
+
+function initializeManualStepActions() {
+  document.querySelectorAll('.step-row').forEach((row) => {
+    const step = Number(row.dataset.step);
+    const statusEl = row.querySelector('.step-status');
+    if (!statusEl) return;
+
+    const actions = document.createElement('div');
+    actions.className = 'step-actions';
+
+    const manualBtn = document.createElement('button');
+    manualBtn.type = 'button';
+    manualBtn.className = 'step-manual-btn';
+    manualBtn.dataset.step = String(step);
+    manualBtn.title = '标记此步已手动完成';
+    manualBtn.setAttribute('aria-label', `标记步骤 ${step} 已手动完成`);
+    manualBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>';
+    manualBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      try {
+        await handleManualComplete(step);
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
+    });
+
+    statusEl.parentNode.replaceChild(actions, statusEl);
+    actions.appendChild(manualBtn);
+    actions.appendChild(statusEl);
+  });
+}
+
 // ============================================================
 // State Restore on load
 // ============================================================
@@ -80,6 +229,8 @@ function dismissToast(toast) {
 async function restoreState() {
   try {
     const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' });
+    syncLatestState(state);
+    syncAutoRunState(state);
 
     if (state.oauthUrl) {
       displayOauthUrl.textContent = state.oauthUrl;
@@ -122,9 +273,11 @@ async function restoreState() {
       }
     }
 
-    updateStatusDisplay(state);
+    applyAutoRunStatus(state);
+    updateStatusDisplay(latestState);
     updateProgressCounter();
     updateMailProviderUI();
+    updateButtonStates();
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
@@ -148,6 +301,13 @@ function updateStepUI(step, status) {
   const statusEl = document.querySelector(`.step-status[data-step="${step}"]`);
   const row = document.querySelector(`.step-row[data-step="${step}"]`);
 
+  syncLatestState({
+    stepStatuses: {
+      ...getStepStatuses(),
+      [step]: status,
+    },
+  });
+
   if (statusEl) statusEl.textContent = STATUS_ICONS[status] || '';
   if (row) {
     row.className = `step-row ${status}`;
@@ -158,42 +318,68 @@ function updateStepUI(step, status) {
 }
 
 function updateProgressCounter() {
-  let completed = 0;
-  document.querySelectorAll('.step-row').forEach(row => {
-    if (row.classList.contains('completed')) completed++;
-  });
+  const completed = Object.values(getStepStatuses()).filter(isDoneStatus).length;
   stepsProgress.textContent = `${completed} / 9`;
 }
 
 function updateButtonStates() {
-  const statuses = {};
-  document.querySelectorAll('.step-row').forEach(row => {
-    const step = Number(row.dataset.step);
-    if (row.classList.contains('completed')) statuses[step] = 'completed';
-    else if (row.classList.contains('running')) statuses[step] = 'running';
-    else if (row.classList.contains('failed')) statuses[step] = 'failed';
-    else if (row.classList.contains('stopped')) statuses[step] = 'stopped';
-    else statuses[step] = 'pending';
-  });
-
+  const statuses = getStepStatuses();
   const anyRunning = Object.values(statuses).some(s => s === 'running');
+  const autoLocked = isAutoRunLockedPhase();
 
   for (let step = 1; step <= 9; step++) {
     const btn = document.querySelector(`.step-btn[data-step="${step}"]`);
     if (!btn) continue;
 
-    if (anyRunning) {
+    if (anyRunning || autoLocked) {
       btn.disabled = true;
     } else if (step === 1) {
       btn.disabled = false;
     } else {
       const prevStatus = statuses[step - 1];
       const currentStatus = statuses[step];
-      btn.disabled = !(prevStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'completed' || currentStatus === 'stopped');
+      btn.disabled = !(isDoneStatus(prevStatus) || currentStatus === 'failed' || isDoneStatus(currentStatus) || currentStatus === 'stopped');
     }
   }
 
-  updateStopButtonState(anyRunning || autoContinueBar.style.display !== 'none');
+  document.querySelectorAll('.step-manual-btn').forEach((btn) => {
+    const step = Number(btn.dataset.step);
+    const currentStatus = statuses[step];
+    const prevStatus = statuses[step - 1];
+
+    if (!MANUAL_COMPLETION_STEPS.has(step) || anyRunning || autoLocked || currentStatus === 'running' || isDoneStatus(currentStatus)) {
+      btn.style.display = 'none';
+      btn.disabled = true;
+      btn.title = '当前不可手动同步';
+      return;
+    }
+
+    if (step > 1 && !isDoneStatus(prevStatus)) {
+      btn.style.display = 'none';
+      btn.disabled = true;
+      btn.title = `请先完成步骤 ${step - 1}`;
+      return;
+    }
+
+    let disabledReason = '';
+    if (step === 3) {
+      if (!(latestState?.email || inputEmail.value.trim())) {
+        disabledReason = '请先填写邮箱';
+      } else if (!(latestState?.password || latestState?.customPassword || inputPassword.value)) {
+        disabledReason = '请先在侧边栏填写固定密码';
+      }
+    } else if (step === 6 && !(latestState?.email || inputEmail.value.trim())) {
+      disabledReason = '请先填写邮箱';
+    } else if (step === 8 && !latestState?.localhostUrl) {
+      disabledReason = '尚未捕获 localhost 回调地址';
+    }
+
+    btn.style.display = '';
+    btn.disabled = Boolean(disabledReason);
+    btn.title = disabledReason || `将步骤 ${step} 标记为已手动完成`;
+  });
+
+  updateStopButtonState(anyRunning || isAutoRunPausedPhase() || autoLocked);
 }
 
 function updateStopButtonState(active) {
@@ -205,9 +391,21 @@ function updateStatusDisplay(state) {
 
   statusBar.className = 'status-bar';
 
+  if (isAutoRunPausedPhase()) {
+    displayStatus.textContent = `自动已暂停${getAutoRunLabel()}，等待邮箱后继续`;
+    statusBar.classList.add('paused');
+    return;
+  }
+
   const running = Object.entries(state.stepStatuses).find(([, s]) => s === 'running');
   if (running) {
     displayStatus.textContent = `步骤 ${running[0]} 运行中...`;
+    statusBar.classList.add('running');
+    return;
+  }
+
+  if (isAutoRunLockedPhase()) {
+    displayStatus.textContent = `${currentAutoRun.phase === 'retrying' ? '自动重试中' : '自动运行中'}${getAutoRunLabel()}`;
     statusBar.classList.add('running');
     return;
   }
@@ -227,15 +425,17 @@ function updateStatusDisplay(state) {
   }
 
   const lastCompleted = Object.entries(state.stepStatuses)
-    .filter(([, s]) => s === 'completed')
+    .filter(([, s]) => isDoneStatus(s))
     .map(([k]) => Number(k))
     .sort((a, b) => b - a)[0];
 
   if (lastCompleted === 9) {
-    displayStatus.textContent = '全部步骤已完成';
+    displayStatus.textContent = isDoneStatus(state.stepStatuses[9]) && state.stepStatuses[9] === 'manual_completed' ? '全部步骤已手动完成' : '全部步骤已完成';
     statusBar.classList.add('completed');
   } else if (lastCompleted) {
-    displayStatus.textContent = `步骤 ${lastCompleted} 已完成`;
+    displayStatus.textContent = state.stepStatuses[lastCompleted] === 'manual_completed'
+      ? `步骤 ${lastCompleted} 已手动完成`
+      : `步骤 ${lastCompleted} 已完成`;
   } else {
     displayStatus.textContent = '就绪';
   }
@@ -306,26 +506,93 @@ function syncPasswordToggleLabel() {
   btnTogglePassword.textContent = inputPassword.type === 'password' ? '显示' : '隐藏';
 }
 
+async function maybeTakeoverAutoRun(actionLabel) {
+  if (!isAutoRunPausedPhase()) {
+    return true;
+  }
+
+  const confirmed = confirm(`当前自动流程已暂停。若继续${actionLabel}，将停止自动流程并切换为手动控制。是否继续？`);
+  if (!confirmed) {
+    return false;
+  }
+
+  await chrome.runtime.sendMessage({ type: 'TAKEOVER_AUTO_RUN', source: 'sidepanel', payload: {} });
+  return true;
+}
+
+async function handleManualComplete(step) {
+  if (!(await maybeTakeoverAutoRun(`手动同步步骤 ${step}`))) {
+    return;
+  }
+
+  if (step === 3 && inputPassword.value !== (latestState?.customPassword || '')) {
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_SETTING',
+      source: 'sidepanel',
+      payload: { customPassword: inputPassword.value },
+    });
+    syncLatestState({ customPassword: inputPassword.value });
+  }
+
+  const confirmed = confirm(`这不会真正执行步骤 ${step}，只会将面板状态同步为“已手动完成”。请确认你已经在网页中手动完成该步骤。`);
+  if (!confirmed) {
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'MARK_STEP_MANUAL_COMPLETE',
+    source: 'sidepanel',
+    payload: { step },
+  });
+
+  if (response?.error) {
+    throw new Error(response.error);
+  }
+
+  showToast(`步骤 ${step} 已同步为手动完成`, 'success', 2200);
+}
+
 // ============================================================
 // Button Handlers
 // ============================================================
 
 document.querySelectorAll('.step-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const step = Number(btn.dataset.step);
-    if (step === 3) {
-      let email = inputEmail.value.trim();
-      if (!email) {
-        try {
-          email = await fetchDuckEmail({ showFailureToast: false });
-        } catch (err) {
-          showToast(`自动获取失败：${err.message}，请手动粘贴邮箱后重试。`, 'warn');
-          return;
+    try {
+      const step = Number(btn.dataset.step);
+      if (!(await maybeTakeoverAutoRun(`执行步骤 ${step}`))) {
+        return;
+      }
+      if (step === 3) {
+        if (inputPassword.value !== (latestState?.customPassword || '')) {
+          await chrome.runtime.sendMessage({
+            type: 'SAVE_SETTING',
+            source: 'sidepanel',
+            payload: { customPassword: inputPassword.value },
+          });
+          syncLatestState({ customPassword: inputPassword.value });
+        }
+        let email = inputEmail.value.trim();
+        if (!email) {
+          try {
+            email = await fetchDuckEmail({ showFailureToast: false });
+          } catch (err) {
+            showToast(`自动获取失败：${err.message}，请手动粘贴邮箱后重试。`, 'warn');
+            return;
+          }
+        }
+        const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
+        if (response?.error) {
+          throw new Error(response.error);
+        }
+      } else {
+        const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
+        if (response?.error) {
+          throw new Error(response.error);
         }
       }
-      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
-    } else {
-      await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
+    } catch (err) {
+      showToast(err.message, 'error');
     }
   });
 });
@@ -375,6 +642,8 @@ btnAutoContinue.addEventListener('click', async () => {
 btnReset.addEventListener('click', async () => {
   if (confirm('确认重置全部步骤和数据吗？')) {
     await chrome.runtime.sendMessage({ type: 'RESET', source: 'sidepanel' });
+    syncLatestState({ stepStatuses: STEP_DEFAULT_STATUSES });
+    syncAutoRunState({ autoRunning: false, autoRunPhase: 'idle', autoRunCurrentRun: 0, autoRunTotalRuns: 1, autoRunAttemptRun: 0 });
     displayOauthUrl.textContent = '等待中...';
     displayOauthUrl.classList.remove('has-value');
     displayLocalhostUrl.textContent = '等待中...';
@@ -385,10 +654,8 @@ btnReset.addEventListener('click', async () => {
     logArea.innerHTML = '';
     document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
     document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
-    btnAutoRun.disabled = false;
-    inputRunCount.disabled = false;
-    btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
-    autoContinueBar.style.display = 'none';
+    setDefaultAutoRunButton();
+    applyAutoRunStatus(currentAutoRun);
     updateStopButtonState(false);
     updateButtonStates();
     updateProgressCounter();
@@ -407,6 +674,8 @@ inputEmail.addEventListener('change', async () => {
     await chrome.runtime.sendMessage({ type: 'SAVE_EMAIL', source: 'sidepanel', payload: { email } });
   }
 });
+inputEmail.addEventListener('input', updateButtonStates);
+inputPassword.addEventListener('input', updateButtonStates);
 
 inputVpsUrl.addEventListener('change', async () => {
   const vpsUrl = inputVpsUrl.value.trim();
@@ -479,9 +748,12 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'STEP_STATUS_CHANGED': {
       const { step, status } = message.payload;
       updateStepUI(step, status);
-      chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(updateStatusDisplay);
-      if (status === 'completed') {
-        chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
+      chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
+        syncLatestState(state);
+        syncAutoRunState(state);
+        updateStatusDisplay(latestState);
+        updateButtonStates();
+        if (status === 'completed' || status === 'manual_completed') {
           syncPasswordField(state);
           if (state.oauthUrl) {
             displayOauthUrl.textContent = state.oauthUrl;
@@ -491,13 +763,22 @@ chrome.runtime.onMessage.addListener((message) => {
             displayLocalhostUrl.textContent = state.localhostUrl;
             displayLocalhostUrl.classList.add('has-value');
           }
-        });
+        }
       }
+      ).catch(() => {});
       break;
     }
 
     case 'AUTO_RUN_RESET': {
       // Full UI reset for next run
+      syncLatestState({
+        oauthUrl: null,
+        localhostUrl: null,
+        email: null,
+        password: null,
+        stepStatuses: STEP_DEFAULT_STATUSES,
+        logs: [],
+      });
       displayOauthUrl.textContent = '等待中...';
       displayOauthUrl.classList.remove('has-value');
       displayLocalhostUrl.textContent = '等待中...';
@@ -508,12 +789,14 @@ chrome.runtime.onMessage.addListener((message) => {
       logArea.innerHTML = '';
       document.querySelectorAll('.step-row').forEach(row => row.className = 'step-row');
       document.querySelectorAll('.step-status').forEach(el => el.textContent = '');
-      updateStopButtonState(false);
+      applyAutoRunStatus(currentAutoRun);
       updateProgressCounter();
+      updateButtonStates();
       break;
     }
 
     case 'DATA_UPDATED': {
+      syncLatestState(message.payload);
       if (message.payload.email) {
         inputEmail.value = message.payload.email;
       }
@@ -532,38 +815,16 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_STATUS': {
-      const { phase, currentRun, totalRuns, attemptRun } = message.payload;
-      const attemptLabel = attemptRun ? ` · 尝试${attemptRun}` : '';
-      const runLabel = totalRuns > 1 ? ` (${currentRun}/${totalRuns}${attemptLabel})` : (attemptLabel ? ` (${attemptLabel.slice(3)})` : '');
-      switch (phase) {
-        case 'waiting_email':
-          autoContinueBar.style.display = 'flex';
-          btnAutoRun.innerHTML = `已暂停${runLabel}`;
-          updateStopButtonState(true);
-          break;
-        case 'running':
-          btnAutoRun.innerHTML = `运行中${runLabel}`;
-          updateStopButtonState(true);
-          break;
-        case 'retrying':
-          btnAutoRun.innerHTML = `重试中${runLabel}`;
-          updateStopButtonState(true);
-          break;
-        case 'complete':
-          btnAutoRun.disabled = false;
-          inputRunCount.disabled = false;
-          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
-          autoContinueBar.style.display = 'none';
-          updateStopButtonState(false);
-          break;
-        case 'stopped':
-          btnAutoRun.disabled = false;
-          inputRunCount.disabled = false;
-          btnAutoRun.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> 自动';
-          autoContinueBar.style.display = 'none';
-          updateStopButtonState(false);
-          break;
-      }
+      syncLatestState({
+        autoRunning: ['running', 'waiting_email', 'retrying'].includes(message.payload.phase),
+        autoRunPhase: message.payload.phase,
+        autoRunCurrentRun: message.payload.currentRun,
+        autoRunTotalRuns: message.payload.totalRuns,
+        autoRunAttemptRun: message.payload.attemptRun,
+      });
+      applyAutoRunStatus(message.payload);
+      updateStatusDisplay(latestState);
+      updateButtonStates();
       break;
     }
   }
@@ -598,8 +859,10 @@ btnTheme.addEventListener('click', () => {
 // Init
 // ============================================================
 
+initializeManualStepActions();
 initTheme();
 restoreState().then(() => {
   syncPasswordToggleLabel();
   updateButtonStates();
+  updateStatusDisplay(latestState);
 });

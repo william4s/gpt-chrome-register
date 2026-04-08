@@ -386,6 +386,12 @@ header {
 .status-bar.stopped .status-dot { background: var(--cyan); }
 .status-bar.stopped { color: var(--cyan); }
 
+.status-bar.paused .status-dot {
+  background: var(--orange);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.status-bar.paused { color: var(--orange); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.85); }
@@ -485,6 +491,9 @@ header {
 .step-row.stopped .step-indicator { border-color: var(--cyan); background: rgba(8, 145, 178, 0.08); }
 .step-row.stopped .step-num { color: var(--cyan); }
 
+.step-row.manual_completed .step-indicator { border-color: var(--blue); background: var(--blue-soft); }
+.step-row.manual_completed .step-num { color: var(--blue); }
+
 /* Step Button */
 .step-btn {
   flex: 1;
@@ -508,6 +517,43 @@ header {
 .step-row.completed .step-btn { border-color: var(--border-subtle); color: var(--text-secondary); opacity: 0.7; }
 .step-row.failed .step-btn { border-color: var(--red); color: var(--red); }
 .step-row.stopped .step-btn { border-color: var(--cyan); color: var(--cyan); }
+.step-row.manual_completed .step-btn { border-color: rgba(37, 99, 235, 0.25); color: var(--blue); opacity: 0.82; }
+
+.step-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 48px;
+  flex-shrink: 0;
+}
+
+.step-manual-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.step-manual-btn:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.step-manual-btn:disabled {
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+  background: var(--bg-base);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
 
 .step-status {
   width: 20px;
@@ -519,6 +565,7 @@ header {
 .step-row.completed .step-status { color: var(--green); }
 .step-row.failed .step-status { color: var(--red); }
 .step-row.stopped .step-status { color: var(--cyan); }
+.step-row.manual_completed .step-status { color: var(--blue); }
 
 /* ============================================================
    Log / Console Section
