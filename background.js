@@ -1734,17 +1734,34 @@ async function executeStep5(state) {
 // Step 6: Login ChatGPT (Background opens tab, chatgpt.js handles login)
 // ============================================================
 
-async function executeStep6(state) {
-  if (!state.oauthUrl) {
-    throw new Error('缺少 OAuth 链接，请先完成步骤 1。');
+async function refreshOAuthUrlBeforeStep6(state) {
+  if (!state.vpsUrl) {
+    throw new Error('尚未配置 VPS 地址，请先在侧边栏填写。');
   }
+
+  await addLog('步骤 6：正在刷新登录用的 OAuth 链接...');
+  const waitForFreshOAuth = waitForStepComplete(1, 120000);
+  await executeStep1(state);
+  await waitForFreshOAuth;
+
+  const latestState = await getState();
+  if (!latestState.oauthUrl) {
+    throw new Error('刷新 OAuth 链接后仍未拿到可用链接。');
+  }
+
+  return latestState.oauthUrl;
+}
+
+async function executeStep6(state) {
   if (!state.email) {
     throw new Error('缺少邮箱地址，请先完成步骤 3。');
   }
 
-  await addLog('步骤 6：正在打开用于登录的 OAuth 链接...');
+  const oauthUrl = await refreshOAuthUrlBeforeStep6(state);
+
+  await addLog('步骤 6：正在打开最新 OAuth 链接并登录...');
   // Reuse the signup-page tab — navigate it to the OAuth URL
-  await reuseOrCreateTab('signup-page', state.oauthUrl);
+  await reuseOrCreateTab('signup-page', oauthUrl);
 
   // signup-page.js will inject (same auth.openai.com domain) and handle login
   await sendToContentScript('signup-page', {
