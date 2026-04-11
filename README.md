@@ -6,15 +6,15 @@
 
 ## 最新版本测试结果
 
-最新版本实测 5 轮，0 次失败：
+最新版本实测了一个 5 轮自动，0 次失重试；睡前挂了一个十轮自动，1次重试：
 
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/images/五轮结果.jpg" alt="最新版本五轮测试结果" width="100%" />
+      <img src="docs/images/五轮自动.png" alt="最新版本五轮测试结果" width="100%" />
     </td>
     <td align="center" width="50%">
-      <img src="docs/images/结果日志.png" alt="最新版本运行日志" width="100%" />
+      <img src="docs/images/十轮自动.png" alt="最新版本运行日志" width="100%" />
     </td>
   </tr>
 </table>
