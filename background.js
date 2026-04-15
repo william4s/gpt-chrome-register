@@ -43,6 +43,12 @@ const AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS = 600;
 const LEGACY_AUTO_STEP_DELAY_KEYS = ['autoStepRandomDelayMinSeconds', 'autoStepRandomDelayMaxSeconds'];
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
+const REGISTRATION_MODE_OAUTH = 'oauth';
+const REGISTRATION_MODE_GPT = 'gpt';
+const OAUTH_STEP_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const GPT_STEP_ORDER = ['A1', 'A2', 'A3', 'A4', 'A5', '1', '6', '7', '8', '9'];
+const ALL_STEP_IDS = [...new Set([...GPT_STEP_ORDER, ...OAUTH_STEP_ORDER])];
+const DEFAULT_STEP_STATUSES = Object.fromEntries(ALL_STEP_IDS.map((stepId) => [stepId, 'pending']));
 const HOTMAIL_SERVICE_MODE_REMOTE = 'remote';
 const HOTMAIL_SERVICE_MODE_LOCAL = 'local';
 const DEFAULT_HOTMAIL_REMOTE_BASE_URL = '';
@@ -57,6 +63,7 @@ initializeSessionStorageAccess();
 
 const PERSISTED_SETTING_DEFAULTS = {
   panelMode: 'cpa',
+  registrationMode: REGISTRATION_MODE_OAUTH,
   vpsUrl: '',
   vpsPassword: '',
   localCpaStep9Mode: DEFAULT_LOCAL_CPA_STEP9_MODE,
@@ -73,6 +80,8 @@ const PERSISTED_SETTING_DEFAULTS = {
   mailProvider: '163',
   emailGenerator: 'duck',
   emailPrefix: '',
+  emailSuffix: '',
+  customEmailAliasMode: false,
   inbucketHost: '',
   inbucketMailbox: '',
   hotmailServiceMode: HOTMAIL_SERVICE_MODE_LOCAL,
@@ -88,11 +97,8 @@ const SETTINGS_EXPORT_SCHEMA_VERSION = 1;
 const SETTINGS_EXPORT_FILENAME_PREFIX = 'multipage-settings';
 
 const DEFAULT_STATE = {
-  currentStep: 0, // 当前流程执行到的步骤编号。
-  stepStatuses: {
-    1: 'pending', 2: 'pending', 3: 'pending', 4: 'pending', 5: 'pending', // 运行时步骤状态映射，不要手动预填。
-    6: 'pending', 7: 'pending', 8: 'pending', 9: 'pending',
-  },
+  currentStep: '', // 当前流程执行到的步骤编号。
+  stepStatuses: { ...DEFAULT_STEP_STATUSES },
   oauthUrl: null, // 运行时抓取到的 OAuth 地址，不要手动预填。
   email: null, // 运行时邮箱，由程序自动获取并写入，不能手动预填。
   password: null, // 运行时实际密码，由 customPassword 或程序自动生成后写入。
@@ -121,6 +127,7 @@ const DEFAULT_STATE = {
   signupVerificationRequestedAt: null,
   loginVerificationRequestedAt: null,
   currentHotmailAccountId: null,
+  signupProfileDraft: null,
 };
 
 function normalizeAutoRunDelayMinutes(value) {
@@ -269,6 +276,11 @@ function normalizeCloudflareDomains(values) {
   return normalizedDomains;
 }
 
+function normalizeCustomEmailSuffix(value = '') {
+  const normalized = String(value || '').trim().replace(/^@+/, '').toLowerCase();
+  return normalized ? `@${normalized}` : '';
+}
+
 function normalizeHotmailServiceMode(rawValue = '') {
   return HOTMAIL_SERVICE_MODE_LOCAL;
 }
@@ -329,6 +341,8 @@ function normalizePersistentSettingValue(key, value) {
   switch (key) {
     case 'panelMode':
       return normalizePanelMode(value);
+    case 'registrationMode':
+      return normalizeRegistrationMode(value);
     case 'vpsUrl':
       return String(value || '').trim();
     case 'vpsPassword':
@@ -360,6 +374,10 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeEmailGenerator(value);
     case 'emailPrefix':
       return String(value || '').trim();
+    case 'emailSuffix':
+      return normalizeCustomEmailSuffix(value);
+    case 'customEmailAliasMode':
+      return Boolean(value);
     case 'inbucketHost':
       return String(value || '').trim();
     case 'inbucketMailbox':
@@ -551,7 +569,7 @@ async function resetState() {
   // Preserve settings and persistent data across resets
   const [prev, persistedSettings] = await Promise.all([
     chrome.storage.session.get([
-      'seenCodes',
+      'seen163MailKeys',
       'seenInbucketMailIds',
       'accounts',
       'tabRegistry',
@@ -563,7 +581,7 @@ async function resetState() {
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
     ...persistedSettings,
-    seenCodes: prev.seenCodes || [],
+    seen163MailKeys: prev.seen163MailKeys || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
@@ -1268,15 +1286,52 @@ function isGeneratedAliasProvider(provider) {
   return provider === '2925';
 }
 
+function isCustomAliasMode(state = {}) {
+  return Boolean(state.customEmailAliasMode)
+    && normalizeEmailGenerator(state.emailGenerator) === 'custom';
+}
+
 function shouldUseCustomRegistrationEmail(state = {}) {
   return !isHotmailProvider(state)
     && !isGeneratedAliasProvider(state.mailProvider)
-    && normalizeEmailGenerator(state.emailGenerator) === 'custom';
+    && normalizeEmailGenerator(state.emailGenerator) === 'custom'
+    && !isCustomAliasMode(state);
+}
+
+function doesCustomAliasEmailMatchTemplate(state = {}, email = '') {
+  if (!isCustomAliasMode(state)) {
+    return false;
+  }
+
+  const emailPrefix = String(state.emailPrefix || '').trim().toLowerCase();
+  const emailSuffix = normalizeCustomEmailSuffix(state.emailSuffix);
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!emailPrefix || !emailSuffix || !normalizedEmail) {
+    return false;
+  }
+  if (!normalizedEmail.startsWith(emailPrefix) || !normalizedEmail.endsWith(emailSuffix)) {
+    return false;
+  }
+
+  const randomPart = normalizedEmail.slice(emailPrefix.length, normalizedEmail.length - emailSuffix.length);
+  return randomPart.length >= 3 && randomPart.length <= 10;
 }
 
 function buildGeneratedAliasEmail(state) {
   const provider = state.mailProvider || '163';
   const emailPrefix = (state.emailPrefix || '').trim();
+
+  if (isCustomAliasMode(state)) {
+    const emailSuffix = normalizeCustomEmailSuffix(state.emailSuffix);
+    if (!emailPrefix) {
+      throw new Error('别名邮箱前缀未设置，请先在侧边栏填写。');
+    }
+    if (!emailSuffix) {
+      throw new Error('别名邮箱后缀未设置，请先在侧边栏填写。');
+    }
+    const randomLength = 3 + Math.floor(Math.random() * 8);
+    return `${emailPrefix}${generateRandomSuffix(randomLength)}${emailSuffix}`;
+  }
 
   if (!emailPrefix) {
     throw new Error('2925 邮箱前缀未设置，请先在侧边栏填写。');
@@ -2120,14 +2175,15 @@ function getSourceLabel(source) {
 // ============================================================
 
 async function setStepStatus(step, status) {
+  const stepId = normalizeStepId(step);
   const state = await getState();
   const statuses = { ...state.stepStatuses };
-  statuses[step] = status;
-  await setState({ stepStatuses: statuses, currentStep: step });
+  statuses[stepId] = status;
+  await setState({ stepStatuses: statuses, currentStep: stepId });
   // Broadcast to side panel
   chrome.runtime.sendMessage({
     type: 'STEP_STATUS_CHANGED',
-    payload: { step, status },
+    payload: { step: stepId, status },
   }).catch(() => { });
 }
 
@@ -2152,6 +2208,8 @@ function isVerificationMailPollingError(error) {
 
 const STEP7_RESTART_FROM_STEP6_ERROR_CODE = 'STEP7_RESTART_FROM_STEP6';
 const STEP7_RESTART_FROM_STEP6_MARKER_PATTERN = /^STEP7_RESTART_FROM_STEP6::([^:]+)::(.*)$/;
+const RESTART_CURRENT_ATTEMPT_ERROR_CODE = 'RESTART_CURRENT_ATTEMPT';
+const RESTART_CURRENT_ATTEMPT_MARKER_PATTERN = /^STEP7_RESTART_CURRENT_ATTEMPT::([^:]+)::(.*)$/;
 
 function createStep7RestartFromStep6Error(details = {}) {
   const { reason = 'unknown', url = '' } = details || {};
@@ -2200,9 +2258,52 @@ function isStep7RecoverableError(error) {
   return isVerificationMailPollingError(error) || isStep7RestartFromStep6Error(error);
 }
 
+function createRestartCurrentAttemptError(details = {}) {
+  const { reason = 'unknown', url = '' } = details || {};
+  let reasonLabel = '当前线程需要整轮从步骤 A1 重新开始';
+  if (reason === 'max_check_attempts_error_page') {
+    reasonLabel = '检测到验证错误页（max_check_attempts），当前线程需要整轮从步骤 A1 重新开始';
+  } else if (reason === 'add_phone_page') {
+    reasonLabel = '检测到手机号页面，当前线程需要整轮从步骤 A1 重新开始';
+  }
+  const error = new Error(`步骤 7/8：${reasonLabel}。${url ? `URL: ${url}` : ''}`.trim());
+  error.code = RESTART_CURRENT_ATTEMPT_ERROR_CODE;
+  error.restartReason = reason;
+  error.restartUrl = url;
+  return error;
+}
+
+function parseRestartCurrentAttemptMarker(message) {
+  const normalized = getErrorMessage(message);
+  const match = normalized.match(RESTART_CURRENT_ATTEMPT_MARKER_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    reason: match[1] || 'unknown',
+    url: match[2] || '',
+  };
+}
+
+function getRestartCurrentAttemptError(result) {
+  if (result?.restartCurrentAttempt) {
+    return createRestartCurrentAttemptError(result);
+  }
+
+  const parsed = parseRestartCurrentAttemptMarker(result?.error || result);
+  if (!parsed) {
+    return null;
+  }
+
+  return createRestartCurrentAttemptError(parsed);
+}
+
 function isRestartCurrentAttemptError(error) {
   const message = String(typeof error === 'string' ? error : error?.message || '');
-  return /当前邮箱已存在，需要重新开始新一轮/.test(message);
+  return error?.code === 'RESTART_CURRENT_ATTEMPT'
+    || /^STEP7_RESTART_CURRENT_ATTEMPT::/i.test(message)
+    || /当前邮箱已存在，需要重新开始新一轮/.test(message);
 }
 
 function isStep9RecoverableAuthError(error) {
@@ -2220,8 +2321,8 @@ function isStepDoneStatus(status) {
   return status === 'completed' || status === 'manual_completed' || status === 'skipped';
 }
 
-function getFirstUnfinishedStep(statuses = {}) {
-  for (let step = 1; step <= 9; step++) {
+function getFirstUnfinishedStep(statuses = {}, orderedSteps = OAUTH_STEP_ORDER) {
+  for (const step of orderedSteps) {
     if (!isStepDoneStatus(statuses[step] || 'pending')) {
       return step;
     }
@@ -2229,12 +2330,14 @@ function getFirstUnfinishedStep(statuses = {}) {
   return null;
 }
 
-function hasSavedProgress(statuses = {}) {
-  return Object.values({ ...DEFAULT_STATE.stepStatuses, ...statuses }).some((status) => status !== 'pending');
+function hasSavedProgress(statuses = {}, orderedSteps = OAUTH_STEP_ORDER) {
+  const mergedStatuses = { ...DEFAULT_STEP_STATUSES, ...statuses };
+  return orderedSteps.some((step) => mergedStatuses[step] !== 'pending');
 }
 
 function getDownstreamStateResets(step) {
-  if (step <= 1) {
+  const stepId = normalizeStepId(step);
+  if (stepId === '1' || stepId === 'A1' || stepId === 'A2') {
     return {
       oauthUrl: null,
       sub2apiSessionId: null,
@@ -2249,9 +2352,10 @@ function getDownstreamStateResets(step) {
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
+      signupProfileDraft: null,
     };
   }
-  if (step === 2) {
+  if (stepId === '2') {
     return {
       password: null,
       lastEmailTimestamp: null,
@@ -2260,26 +2364,49 @@ function getDownstreamStateResets(step) {
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
+      signupProfileDraft: null,
     };
   }
-  if (step === 3 || step === 4) {
+  if (['3', '4', 'A3', 'A4'].includes(stepId)) {
     return {
+      oauthUrl: null,
+      sub2apiSessionId: null,
+      sub2apiOAuthState: null,
+      sub2apiGroupId: null,
+      sub2apiDraftName: null,
+      flowStartTime: null,
       lastEmailTimestamp: null,
       signupVerificationRequestedAt: null,
       loginVerificationRequestedAt: null,
       lastSignupCode: null,
       lastLoginCode: null,
       localhostUrl: null,
+      signupProfileDraft: null,
     };
   }
-  if (step === 5 || step === 6 || step === 7) {
+  if (stepId === 'A5') {
+    return {
+      oauthUrl: null,
+      sub2apiSessionId: null,
+      sub2apiOAuthState: null,
+      sub2apiGroupId: null,
+      sub2apiDraftName: null,
+      flowStartTime: null,
+      lastLoginCode: null,
+      loginVerificationRequestedAt: null,
+      localhostUrl: null,
+      signupProfileDraft: null,
+    };
+  }
+  if (['5', '6', '7'].includes(stepId)) {
     return {
       lastLoginCode: null,
       loginVerificationRequestedAt: null,
       localhostUrl: null,
+      signupProfileDraft: null,
     };
   }
-  if (step === 8) {
+  if (stepId === '8') {
     return {
       localhostUrl: null,
     };
@@ -2288,12 +2415,19 @@ function getDownstreamStateResets(step) {
 }
 
 async function invalidateDownstreamAfterStepRestart(step, options = {}) {
-  const { logLabel = `步骤 ${step} 重新执行` } = options;
+  const stepId = normalizeStepId(step);
+  const { logLabel = `步骤 ${stepId} 重新执行` } = options;
   const state = await getState();
   const statuses = { ...(state.stepStatuses || {}) };
   const changedSteps = [];
 
-  for (let downstream = step + 1; downstream <= 9; downstream++) {
+  const orderedSteps = getOrderedStepIds(state);
+  const currentIndex = orderedSteps.indexOf(stepId);
+  if (currentIndex === -1) {
+    throw new Error(`无效步骤：${stepId}`);
+  }
+
+  for (const downstream of orderedSteps.slice(currentIndex + 1)) {
     if (statuses[downstream] !== 'pending') {
       statuses[downstream] = 'pending';
       changedSteps.push(downstream);
@@ -2311,7 +2445,7 @@ async function invalidateDownstreamAfterStepRestart(step, options = {}) {
     await addLog(`${logLabel}，已重置后续步骤状态：${changedSteps.join(', ')}`, 'warn');
   }
 
-  const resets = getDownstreamStateResets(step);
+  const resets = getDownstreamStateResets(stepId);
   if (Object.keys(resets).length) {
     await setState(resets);
     broadcastDataUpdate(resets);
@@ -2322,11 +2456,9 @@ function clearStopRequest() {
   stopRequested = false;
 }
 
-function getRunningSteps(statuses = {}) {
-  return Object.entries({ ...DEFAULT_STATE.stepStatuses, ...statuses })
-    .filter(([, status]) => status === 'running')
-    .map(([step]) => Number(step))
-    .sort((a, b) => a - b);
+function getRunningSteps(statuses = {}, orderedSteps = OAUTH_STEP_ORDER) {
+  const mergedStatuses = { ...DEFAULT_STEP_STATUSES, ...statuses };
+  return orderedSteps.filter((step) => mergedStatuses[step] === 'running');
 }
 
 function getAutoRunStatusPayload(phase, payload = {}) {
@@ -2603,40 +2735,44 @@ async function ensureManualInteractionAllowed(actionLabel) {
 
 async function skipStep(step) {
   const state = await ensureManualInteractionAllowed('跳过步骤');
+  const stepId = normalizeStepId(step);
+  const orderedSteps = getOrderedStepIds(state);
+  const currentIndex = orderedSteps.indexOf(stepId);
 
-  if (!Number.isInteger(step) || step < 1 || step > 9) {
-    throw new Error(`无效步骤：${step}`);
+  if (currentIndex === -1) {
+    throw new Error(`无效步骤：${stepId}`);
   }
 
   const statuses = { ...(state.stepStatuses || {}) };
-  const currentStatus = statuses[step];
+  const currentStatus = statuses[stepId];
   if (currentStatus === 'running') {
-    throw new Error(`步骤 ${step} 正在运行中，不能跳过。`);
+    throw new Error(`步骤 ${stepId} 正在运行中，不能跳过。`);
   }
   if (isStepDoneStatus(currentStatus)) {
-    throw new Error(`步骤 ${step} 已完成，无需再跳过。`);
+    throw new Error(`步骤 ${stepId} 已完成，无需再跳过。`);
   }
 
-  if (step > 1) {
-    const prevStatus = statuses[step - 1];
+  if (currentIndex > 0) {
+    const prevStep = orderedSteps[currentIndex - 1];
+    const prevStatus = statuses[prevStep];
     if (!isStepDoneStatus(prevStatus)) {
-      throw new Error(`请先完成步骤 ${step - 1}，再跳过步骤 ${step}。`);
+      throw new Error(`请先完成步骤 ${prevStep}，再跳过步骤 ${stepId}。`);
     }
   }
 
-  await setStepStatus(step, 'skipped');
-  await addLog(`步骤 ${step} 已跳过`, 'warn');
+  await setStepStatus(stepId, 'skipped');
+  await addLog(`步骤 ${stepId} 已跳过`, 'warn');
 
-  if (step === 1) {
+  if (stepId === '1' && normalizeRegistrationMode(state.registrationMode) === REGISTRATION_MODE_OAUTH) {
     const latestState = await getState();
-    const step2Status = latestState.stepStatuses?.[2];
+    const step2Status = latestState.stepStatuses?.['2'];
     if (!isStepDoneStatus(step2Status) && step2Status !== 'running') {
-      await setStepStatus(2, 'skipped');
+      await setStepStatus('2', 'skipped');
       await addLog('步骤 1 已跳过，步骤 2 也已同时跳过。', 'warn');
     }
   }
 
-  return { ok: true, step, status: 'skipped' };
+  return { ok: true, step: stepId, status: 'skipped' };
 }
 
 function throwIfStopped() {
@@ -2753,9 +2889,13 @@ async function handleMessage(message, sender) {
     case 'CONTENT_SCRIPT_READY': {
       const tabId = sender.tab?.id;
       if (tabId && message.source) {
+        const hadPendingCommand = pendingCommands.has(message.source);
         await registerTab(message.source, tabId);
         flushCommand(message.source, tabId);
         await addLog(`内容脚本已就绪：${getSourceLabel(message.source)}（标签页 ${tabId}）`);
+        if (!hadPendingCommand) {
+          await replayRunningReadyStepIfNeeded(message.source);
+        }
       }
       return { ok: true };
     }
@@ -2767,27 +2907,29 @@ async function handleMessage(message, sender) {
     }
 
     case 'STEP_COMPLETE': {
+      const step = normalizeStepId(message.step);
       if (stopRequested) {
-        await setStepStatus(message.step, 'stopped');
-        notifyStepError(message.step, STOP_ERROR_MESSAGE);
+        await setStepStatus(step, 'stopped');
+        notifyStepError(step, STOP_ERROR_MESSAGE);
         return { ok: true };
       }
-      await setStepStatus(message.step, 'completed');
-      await addLog(`步骤 ${message.step} 已完成`, 'ok');
-      await handleStepData(message.step, message.payload);
-      notifyStepComplete(message.step, message.payload);
+      await setStepStatus(step, 'completed');
+      await addLog(`步骤 ${step} 已完成`, 'ok');
+      await handleStepData(step, message.payload);
+      notifyStepComplete(step, message.payload);
       return { ok: true };
     }
 
     case 'STEP_ERROR': {
+      const step = normalizeStepId(message.step);
       if (isStopError(message.error)) {
-        await setStepStatus(message.step, 'stopped');
-        await addLog(`步骤 ${message.step} 已被用户停止`, 'warn');
-        notifyStepError(message.step, message.error);
+        await setStepStatus(step, 'stopped');
+        await addLog(`步骤 ${step} 已被用户停止`, 'warn');
+        notifyStepError(step, message.error);
       } else {
-        await setStepStatus(message.step, 'failed');
-        await addLog(`步骤 ${message.step} 失败：${message.error}`, 'error');
-        notifyStepError(message.step, message.error);
+        await setStepStatus(step, 'failed');
+        await addLog(`步骤 ${step} 失败：${message.error}`, 'error');
+        notifyStepError(step, message.error);
       }
       return { ok: true };
     }
@@ -2809,7 +2951,7 @@ async function handleMessage(message, sender) {
       if (message.source === 'sidepanel') {
         await ensureManualInteractionAllowed('手动执行步骤');
       }
-      const step = message.payload.step;
+      const step = normalizeStepId(message.payload.step);
       if (message.source === 'sidepanel') {
         await invalidateDownstreamAfterStepRestart(step, { logLabel: `步骤 ${step} 重新执行` });
       }
@@ -2820,6 +2962,14 @@ async function handleMessage(message, sender) {
       if (message.payload.emailPrefix !== undefined) {
         await setPersistentSettings({ emailPrefix: message.payload.emailPrefix });
         await setState({ emailPrefix: message.payload.emailPrefix });
+      }
+      if (message.payload.emailSuffix !== undefined) {
+        await setPersistentSettings({ emailSuffix: message.payload.emailSuffix });
+        await setState({ emailSuffix: message.payload.emailSuffix });
+      }
+      if (message.payload.customEmailAliasMode !== undefined) {
+        await setPersistentSettings({ customEmailAliasMode: message.payload.customEmailAliasMode });
+        await setState({ customEmailAliasMode: message.payload.customEmailAliasMode });
       }
       if (doesStepUseCompletionSignal(step)) {
         await executeStepViaCompletionSignal(step);
@@ -3026,8 +3176,9 @@ async function handleMessage(message, sender) {
 // ============================================================
 
 async function handleStepData(step, payload) {
-  switch (step) {
-    case 1: {
+  const stepId = normalizeStepId(step);
+  switch (stepId) {
+    case '1': {
       const updates = {};
       if (payload.oauthUrl) {
         updates.oauthUrl = payload.oauthUrl;
@@ -3042,7 +3193,11 @@ async function handleStepData(step, payload) {
       }
       break;
     }
-    case 3:
+    case 'A2':
+      if (payload.email) await setEmailState(payload.email);
+      break;
+    case '3':
+    case 'A3':
       if (payload.email) await setEmailState(payload.email);
       if (payload.signupVerificationRequestedAt) {
         await setState({ signupVerificationRequestedAt: payload.signupVerificationRequestedAt });
@@ -3051,24 +3206,29 @@ async function handleStepData(step, payload) {
         await setState({ loginVerificationRequestedAt: payload.loginVerificationRequestedAt });
       }
       break;
-    case 6:
+    case '6':
       if (payload.loginVerificationRequestedAt) {
         await setState({ loginVerificationRequestedAt: payload.loginVerificationRequestedAt });
       }
       break;
-    case 4:
+    case '4':
+    case 'A4':
       await setState({
         lastEmailTimestamp: payload.emailTimestamp || null,
         signupVerificationRequestedAt: null,
       });
       break;
-    case 7:
+    case '7':
       await setState({
         lastEmailTimestamp: payload.emailTimestamp || null,
         loginVerificationRequestedAt: null,
       });
       break;
-    case 8:
+    case '5':
+    case 'A5':
+      await setState({ signupProfileDraft: null });
+      break;
+    case '8':
       if (payload.localhostUrl) {
         if (!isLocalhostOAuthCallbackUrl(payload.localhostUrl)) {
           throw new Error('步骤 8 返回了无效的 localhost OAuth 回调地址。');
@@ -3077,7 +3237,7 @@ async function handleStepData(step, payload) {
         broadcastDataUpdate({ localhostUrl: payload.localhostUrl });
       }
       break;
-    case 9: {
+    case '9': {
       if (payload.localhostUrl) {
         await closeLocalhostCallbackTabs(payload.localhostUrl);
       }
@@ -3109,10 +3269,11 @@ async function handleStepData(step, payload) {
 const stepWaiters = new Map();
 let resumeWaiter = null;
 const AUTO_RUN_SIGNAL_COMPLETION_TIMEOUT_MS = 120000;
-const AUTO_RUN_BACKGROUND_COMPLETED_STEPS = new Set([4, 7, 8]);
-const STEP_COMPLETION_SIGNAL_STEPS = new Set([1, 2, 3, 5, 6, 9]);
+const AUTO_RUN_BACKGROUND_COMPLETED_STEPS = new Set(['4', '7', '8', 'A4']);
+const STEP_COMPLETION_SIGNAL_STEPS = new Set(['1', '2', '3', '5', '6', '9', 'A1', 'A2', 'A3', 'A5']);
 
 function waitForStepComplete(step, timeoutMs = 120000) {
+  step = normalizeStepId(step);
   return new Promise((resolve, reject) => {
     throwIfStopped();
     if (stepWaiters.has(step)) {
@@ -3133,16 +3294,18 @@ function waitForStepComplete(step, timeoutMs = 120000) {
 }
 
 function doesStepUseCompletionSignal(step) {
-  return STEP_COMPLETION_SIGNAL_STEPS.has(step);
+  return STEP_COMPLETION_SIGNAL_STEPS.has(normalizeStepId(step));
 }
 
 function notifyStepComplete(step, payload) {
+  step = normalizeStepId(step);
   const waiter = stepWaiters.get(step);
   console.log(LOG_PREFIX, `[notifyStepComplete] step ${step}, hasWaiter=${Boolean(waiter)}`);
   if (waiter) waiter.resolve(payload);
 }
 
 function notifyStepError(step, error) {
+  step = normalizeStepId(step);
   const waiter = stepWaiters.get(step);
   console.warn(LOG_PREFIX, `[notifyStepError] step ${step}, hasWaiter=${Boolean(waiter)}, error=${error}`);
   if (waiter) waiter.reject(new Error(error));
@@ -3223,7 +3386,7 @@ async function executeStepViaCompletionSignal(step, timeoutMs = AUTO_RUN_SIGNAL_
 
 async function waitForRunningStepsToFinish(payload = {}) {
   let currentState = await getState();
-  let runningSteps = getRunningSteps(currentState.stepStatuses);
+  let runningSteps = getRunningSteps(currentState.stepStatuses, getOrderedStepIds(currentState));
   if (!runningSteps.length) {
     return currentState;
   }
@@ -3234,7 +3397,7 @@ async function waitForRunningStepsToFinish(payload = {}) {
   while (runningSteps.length) {
     await sleepWithStop(250);
     currentState = await getState();
-    runningSteps = getRunningSteps(currentState.stepStatuses);
+    runningSteps = getRunningSteps(currentState.stepStatuses, getOrderedStepIds(currentState));
   }
 
   await addLog('自动继续：当前运行步骤已结束，准备按最新进度继续自动流程...', 'info');
@@ -3243,7 +3406,7 @@ async function waitForRunningStepsToFinish(payload = {}) {
 
 async function markRunningStepsStopped() {
   const state = await getState();
-  const runningSteps = getRunningSteps(state.stepStatuses);
+  const runningSteps = getRunningSteps(state.stepStatuses, getOrderedStepIds(state));
 
   for (const step of runningSteps) {
     await setStepStatus(step, 'stopped');
@@ -3298,6 +3461,7 @@ async function requestStop(options = {}) {
 
 async function executeStep(step, options = {}) {
   const { deferRetryableTransportError = false } = options;
+  step = normalizeStepId(step);
   console.log(LOG_PREFIX, `Executing step ${step}`);
   throwIfStopped();
   await setStepStatus(step, 'running');
@@ -3305,23 +3469,29 @@ async function executeStep(step, options = {}) {
   await humanStepDelay();
 
   const state = await getState();
+  const orderedSteps = getOrderedStepIds(state);
 
   // Set flow start time on first step
-  if (step === 1 && !state.flowStartTime) {
+  if (step === orderedSteps[0] && !state.flowStartTime) {
     await setState({ flowStartTime: Date.now() });
   }
 
   try {
     switch (step) {
-      case 1: await executeStep1(state); break;
-      case 2: await executeStep2(state); break;
-      case 3: await executeStep3(state); break;
-      case 4: await executeStep4(state); break;
-      case 5: await executeStep5(state); break;
-      case 6: await executeStep6(state); break;
-      case 7: await executeStep7(state); break;
-      case 8: await executeStep8(state); break;
-      case 9: await executeStep9(state); break;
+      case 'A1': await executeStepA1(state); break;
+      case 'A2': await executeStepA2(state); break;
+      case 'A3': await executeStepA3(state); break;
+      case 'A4': await executeStepA4(state); break;
+      case 'A5': await executeStepA5(state); break;
+      case '1': await executeStep1(state); break;
+      case '2': await executeStep2(state); break;
+      case '3': await executeStep3(state); break;
+      case '4': await executeStep4(state); break;
+      case '5': await executeStep5(state); break;
+      case '6': await executeStep6(state); break;
+      case '7': await executeStep7(state); break;
+      case '8': await executeStep8(state); break;
+      case '9': await executeStep9(state); break;
       default:
         throw new Error(`未知步骤：${step}`);
     }
@@ -3385,6 +3555,50 @@ function getEmailGeneratorLabel(generator) {
     return '自定义邮箱';
   }
   return generator === 'cloudflare' ? 'Cloudflare 邮箱' : 'Duck 邮箱';
+}
+
+function normalizeStepId(step) {
+  const value = String(step ?? '').trim();
+  if (/^a[1-5]$/i.test(value)) {
+    return value.toUpperCase();
+  }
+  if (/^[1-9]$/.test(value)) {
+    return value;
+  }
+  return value.toUpperCase();
+}
+
+function normalizeRegistrationMode(value = '') {
+  return String(value || '').trim().toLowerCase() === REGISTRATION_MODE_GPT
+    ? REGISTRATION_MODE_GPT
+    : REGISTRATION_MODE_OAUTH;
+}
+
+function getOrderedStepIds(state = {}) {
+  return normalizeRegistrationMode(state.registrationMode) === REGISTRATION_MODE_GPT
+    ? GPT_STEP_ORDER
+    : OAUTH_STEP_ORDER;
+}
+
+function getLastStepId(state = {}) {
+  const steps = getOrderedStepIds(state);
+  return steps[steps.length - 1] || null;
+}
+
+function isGptRegistrationStep(step) {
+  return /^A[1-5]$/i.test(normalizeStepId(step));
+}
+
+function isSignupVerificationStep(step) {
+  return ['4', 'A4'].includes(normalizeStepId(step));
+}
+
+function isLoginVerificationStep(step) {
+  return normalizeStepId(step) === '7';
+}
+
+function getVerificationFlowStep(step) {
+  return isSignupVerificationStep(step) ? 4 : 7;
 }
 
 function generateCloudflareAliasLocalPart() {
@@ -3453,7 +3667,17 @@ async function fetchGeneratedEmail(state, options = {}) {
   const currentState = state || await getState();
   const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
   if (generator === 'custom') {
-    throw new Error('当前邮箱生成方式为自定义邮箱，请直接填写注册邮箱。');
+    if (!isCustomAliasMode(currentState)) {
+      throw new Error('当前邮箱生成方式为自定义邮箱，请直接填写注册邮箱。');
+    }
+    if (!options.generateNew && doesCustomAliasEmailMatchTemplate(currentState, currentState.email)) {
+      return currentState.email;
+    }
+
+    const email = buildGeneratedAliasEmail(currentState);
+    await setEmailState(email);
+    await addLog(`自定义邮箱：已生成 ${email}`, 'ok');
+    return email;
   }
   if (generator === 'cloudflare') {
     return fetchCloudflareEmail(currentState, options);
@@ -3472,6 +3696,11 @@ let autoRunAttemptRun = 0;
 const EMAIL_FETCH_MAX_ATTEMPTS = 5;
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
 const AUTO_STEP_DELAYS = {
+  A1: 2500,
+  A2: 2000,
+  A3: 2500,
+  A4: 2000,
+  A5: 3000,
   1: 2000,
   2: 2000,
   3: 3000,
@@ -3520,6 +3749,19 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
     }
     await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：2925 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
     return null;
+  }
+
+  if (isCustomAliasMode(currentState)) {
+    if (doesCustomAliasEmailMatchTemplate(currentState, currentState.email)) {
+      return currentState.email;
+    }
+
+    const generatedEmail = await fetchGeneratedEmail(currentState, { generateNew: true, generator: 'custom' });
+    await addLog(
+      `=== 目标 ${targetRun}/${totalRuns} 轮：自定义邮箱已就绪：${generatedEmail}（第 ${attemptRuns} 次尝试）===`,
+      'ok'
+    );
+    return generatedEmail;
   }
 
   if (currentState.email) {
@@ -3584,71 +3826,120 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
 }
 
 async function runAutoSequenceFromStep(startStep, context = {}) {
-  const { targetRun, totalRuns, attemptRuns, continued = false } = context;
-  const maxStep9RestartAttempts = 5;
-  let step9RestartAttempts = 0;
+  const normalizedStartStep = normalizeStepId(startStep);
+  const { targetRun: ctxTargetRun, totalRuns: ctxTotalRuns, attemptRuns: ctxAttemptRuns, continued: ctxContinued = false } = context;
+  const ctxMaxStep9RestartAttempts = 5;
+  let ctxStep9RestartAttempts = 0;
+  const sequenceState = await getState();
+  const orderedSteps = getOrderedStepIds(sequenceState);
+  const emailPreparationStep = normalizeRegistrationMode(sequenceState.registrationMode) === REGISTRATION_MODE_GPT ? 'A2' : '3';
+  let currentIndex = orderedSteps.indexOf(normalizedStartStep);
 
-  if (continued) {
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：继续当前进度，从步骤 ${startStep} 开始（第 ${attemptRuns} 次尝试）===`, 'info');
+  if (currentIndex === -1) {
+    throw new Error(`无法在当前注册模式下找到步骤 ${normalizedStartStep}。`);
+  }
+
+  if (ctxContinued) {
+    await addLog(`=== 目标 ${ctxTargetRun}/${ctxTotalRuns} 轮：继续当前进度，从步骤 ${normalizedStartStep} 开始（第 ${ctxAttemptRuns} 次尝试）===`, 'info');
   } else {
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：第 ${attemptRuns} 次尝试，阶段 1，获取 OAuth 链接并打开注册页 ===`, 'info');
+    await addLog(`=== 目标 ${ctxTargetRun}/${ctxTotalRuns} 轮：按 ${normalizeRegistrationMode(sequenceState.registrationMode)} 模式从步骤 ${normalizedStartStep} 开始（第 ${ctxAttemptRuns} 次尝试）===`, 'info');
   }
 
-  if (startStep <= 2) {
-    for (const step of [1, 2]) {
-      if (step < startStep) continue;
-      await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
-    }
-  }
+  await broadcastAutoRunStatus('running', {
+    currentRun: ctxTargetRun,
+    totalRuns: ctxTotalRuns,
+    attemptRun: ctxAttemptRuns,
+  });
 
-  if (startStep <= 3) {
-    await ensureAutoEmailReady(targetRun, totalRuns, attemptRuns);
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：阶段 2，注册、验证、登录并完成授权（第 ${attemptRuns} 次尝试）===`, 'info');
-    await broadcastAutoRunStatus('running', {
-      currentRun: targetRun,
-      totalRuns,
-      attemptRun: attemptRuns,
-    });
-    await executeStepAndWait(3, AUTO_STEP_DELAYS[3]);
-  } else {
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：继续执行剩余流程（第 ${attemptRuns} 次尝试）===`, 'info');
-  }
-
-  const signupTabId = await getTabId('signup-page');
-  if (signupTabId) {
-    await chrome.tabs.update(signupTabId, { active: true });
-  }
-
-  let step = Math.max(startStep, 4);
-  while (step <= 9) {
+  while (currentIndex < orderedSteps.length) {
+    const currentStepId = orderedSteps[currentIndex];
     try {
-      await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
-      step += 1;
+      if (currentStepId === emailPreparationStep) {
+        await ensureAutoEmailReady(ctxTargetRun, ctxTotalRuns, ctxAttemptRuns);
+      }
+
+      await executeStepAndWait(currentStepId, AUTO_STEP_DELAYS[currentStepId] || 2000);
+      currentIndex += 1;
     } catch (err) {
       const latestState = await getState();
       const currentMail = getMailConfig(latestState);
-      const shouldRetryStep9 = step === 9
+      const shouldRetryStep9 = currentStepId === '9'
         && (
           isLegacyStep9RecoverableAuthError(err)
           || (currentMail.provider === HOTMAIL_PROVIDER && isStep9RecoverableAuthError(err))
         )
-        && step9RestartAttempts < maxStep9RestartAttempts;
+        && ctxStep9RestartAttempts < ctxMaxStep9RestartAttempts;
 
       if (shouldRetryStep9) {
-        step9RestartAttempts += 1;
+        ctxStep9RestartAttempts += 1;
         await addLog(
-          `步骤 9：检测到 CPA 认证失败，正在回到步骤 6 重新开始授权流程（${step9RestartAttempts}/${maxStep9RestartAttempts}）...`,
+          `步骤 9：检测到认证失败，正在回到步骤 6 重新开始授权流程（${ctxStep9RestartAttempts}/${ctxMaxStep9RestartAttempts}）...`,
           'warn'
         );
-        await invalidateDownstreamAfterStepRestart(6, {
-          logLabel: `步骤 9 认证失败后准备回到步骤 6 重试（${step9RestartAttempts}/${maxStep9RestartAttempts}）`,
+        await invalidateDownstreamAfterStepRestart('6', {
+          logLabel: `步骤 9 认证失败后准备回到步骤 6 重试（${ctxStep9RestartAttempts}/${ctxMaxStep9RestartAttempts}）`,
         });
-        step = 6;
+        currentIndex = orderedSteps.indexOf('6');
         continue;
       }
       throw err;
     }
   }
+}
+
+async function replayRunningReadyStepIfNeeded(source) {
+  if (source !== 'signup-page') {
+    return false;
+  }
+
+  const state = await getState();
+  const currentStep = normalizeStepId(state.currentStep);
+  const currentStatus = state.stepStatuses?.[currentStep];
+  if (currentStatus !== 'running') {
+    return false;
+  }
+
+  let command = null;
+  if (currentStep === 'A1') {
+    command = {
+      type: 'EXECUTE_STEP',
+      step: 'A1',
+      source: 'background',
+      payload: {},
+    };
+  } else if (currentStep === 'A2' && state.email) {
+    command = {
+      type: 'EXECUTE_STEP',
+      step: 'A2',
+      source: 'background',
+      payload: { email: state.email },
+    };
+  } else if (currentStep === 'A3') {
+    const password = state.password || state.customPassword || '';
+    if (password) {
+      command = {
+        type: 'EXECUTE_STEP',
+        step: 'A3',
+        source: 'background',
+        payload: { password },
+      };
+    }
+  } else if (currentStep === 'A5' && state.signupProfileDraft) {
+    command = {
+      type: 'EXECUTE_STEP',
+      step: 'A5',
+      source: 'background',
+      payload: state.signupProfileDraft,
+    };
+  }
+
+  if (!command) {
+    return false;
+  }
+
+  await addLog(`认证页重新就绪，正在重发步骤 ${currentStep} 命令...`, 'warn');
+  await sendToContentScript('signup-page', command);
+  return true;
 }
 
 // Outer loop: keep retrying until the target number of successful runs is reached.
@@ -3675,7 +3966,7 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
   let forceFreshTabsNextRun = false;
   let continueCurrentOnFirstAttempt = initialMode === 'continue';
   const initialState = await getState();
-  const initialPhase = continueCurrentOnFirstAttempt && getRunningSteps(initialState.stepStatuses).length
+  const initialPhase = continueCurrentOnFirstAttempt && getRunningSteps(initialState.stepStatuses, getOrderedStepIds(initialState)).length
     ? 'waiting_step'
     : 'running';
 
@@ -3693,23 +3984,24 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
     const targetRun = successfulRuns + 1;
     autoRunCurrentRun = targetRun;
     autoRunAttemptRun = attemptRuns;
-    let startStep = 1;
+    let startStep = getOrderedStepIds(await getState())[0] || '1';
     let useExistingProgress = false;
 
     if (continueCurrentOnFirstAttempt) {
       let currentState = await getState();
-      if (getRunningSteps(currentState.stepStatuses).length) {
+      if (getRunningSteps(currentState.stepStatuses, getOrderedStepIds(currentState)).length) {
         currentState = await waitForRunningStepsToFinish({
           currentRun: targetRun,
           totalRuns,
           attemptRun: attemptRuns,
         });
       }
-      const resumeStep = getFirstUnfinishedStep(currentState.stepStatuses);
-      if (resumeStep && hasSavedProgress(currentState.stepStatuses)) {
+      const orderedSteps = getOrderedStepIds(currentState);
+      const resumeStep = getFirstUnfinishedStep(currentState.stepStatuses, orderedSteps);
+      if (resumeStep && hasSavedProgress(currentState.stepStatuses, orderedSteps)) {
         startStep = resumeStep;
         useExistingProgress = true;
-      } else if (hasSavedProgress(currentState.stepStatuses)) {
+      } else if (hasSavedProgress(currentState.stepStatuses, orderedSteps)) {
         await addLog('当前流程已全部处理，将按“重新开始”新开一轮自动运行。', 'info');
       }
       continueCurrentOnFirstAttempt = false;
@@ -3721,6 +4013,7 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
       const keepSettings = {
         vpsUrl: prevState.vpsUrl,
         vpsPassword: prevState.vpsPassword,
+        registrationMode: prevState.registrationMode,
         customPassword: prevState.customPassword,
         autoRunSkipFailures: prevState.autoRunSkipFailures,
         autoRunFallbackThreadIntervalMinutes: prevState.autoRunFallbackThreadIntervalMinutes,
@@ -3734,6 +4027,9 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
         inbucketMailbox: prevState.inbucketMailbox,
         cloudflareDomain: prevState.cloudflareDomain,
         cloudflareDomains: prevState.cloudflareDomains,
+        ...(shouldUseCustomRegistrationEmail(prevState) && prevState.email
+          ? { email: prevState.email }
+          : {}),
         // Fresh attempts must drop stale tab/url runtime state from the prior run.
         tabRegistry: {},
         sourceLastUrls: {},
@@ -4086,7 +4382,7 @@ async function autoRunLoop(totalRuns, options = {}) {
 
   let successfulRuns = roundSummaries.filter((item) => item.status === 'success').length;
   const initialState = await getState();
-  const initialPhase = continueCurrentOnFirstAttempt && getRunningSteps(initialState.stepStatuses).length
+  const initialPhase = continueCurrentOnFirstAttempt && getRunningSteps(initialState.stepStatuses, getOrderedStepIds(initialState)).length
     ? 'waiting_step'
     : 'running';
 
@@ -4109,23 +4405,24 @@ async function autoRunLoop(totalRuns, options = {}) {
       autoRunCurrentRun = targetRun;
       autoRunAttemptRun = attemptRun;
       roundSummary.attempts = attemptRun;
-      let startStep = 1;
+      let startStep = getOrderedStepIds(await getState())[0] || '1';
       let useExistingProgress = false;
 
       if (reuseExistingProgress) {
         let currentState = await getState();
-        if (getRunningSteps(currentState.stepStatuses).length) {
+        if (getRunningSteps(currentState.stepStatuses, getOrderedStepIds(currentState)).length) {
           currentState = await waitForRunningStepsToFinish({
             currentRun: targetRun,
             totalRuns,
             attemptRun,
           });
         }
-        const resumeStep = getFirstUnfinishedStep(currentState.stepStatuses);
-        if (resumeStep && hasSavedProgress(currentState.stepStatuses)) {
+        const orderedSteps = getOrderedStepIds(currentState);
+        const resumeStep = getFirstUnfinishedStep(currentState.stepStatuses, orderedSteps);
+        if (resumeStep && hasSavedProgress(currentState.stepStatuses, orderedSteps)) {
           startStep = resumeStep;
           useExistingProgress = true;
-        } else if (hasSavedProgress(currentState.stepStatuses)) {
+        } else if (hasSavedProgress(currentState.stepStatuses, orderedSteps)) {
           await addLog('检测到当前流程已处理完成，本轮将改为从步骤 1 重新开始。', 'info');
         }
       }
@@ -4135,6 +4432,7 @@ async function autoRunLoop(totalRuns, options = {}) {
         const keepSettings = {
           vpsUrl: prevState.vpsUrl,
           vpsPassword: prevState.vpsPassword,
+          registrationMode: prevState.registrationMode,
           customPassword: prevState.customPassword,
           autoRunSkipFailures: prevState.autoRunSkipFailures,
           autoRunFallbackThreadIntervalMinutes: prevState.autoRunFallbackThreadIntervalMinutes,
@@ -4148,6 +4446,9 @@ async function autoRunLoop(totalRuns, options = {}) {
           inbucketMailbox: prevState.inbucketMailbox,
           cloudflareDomain: prevState.cloudflareDomain,
           cloudflareDomains: prevState.cloudflareDomains,
+          ...(shouldUseCustomRegistrationEmail(prevState) && prevState.email
+            ? { email: prevState.email }
+            : {}),
           autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
           tabRegistry: {},
           sourceLastUrls: {},
@@ -4460,6 +4761,87 @@ async function executeSub2ApiStep1(state) {
 // Step 2: Open Signup Page (Background opens tab, signup-page.js clicks Register)
 // ============================================================
 
+async function resolveRegistrationEmail(state) {
+  let resolvedEmail = state.email;
+  if (isHotmailProvider(state)) {
+    const account = await ensureHotmailAccountForFlow({
+      allowAllocate: true,
+      markUsed: true,
+      preferredAccountId: state.currentHotmailAccountId || null,
+    });
+    resolvedEmail = account.email;
+  } else if (isGeneratedAliasProvider(state.mailProvider)) {
+    resolvedEmail = buildGeneratedAliasEmail(state);
+  } else if (isCustomAliasMode(state) && !doesCustomAliasEmailMatchTemplate(state, resolvedEmail)) {
+    resolvedEmail = buildGeneratedAliasEmail(state);
+  }
+
+  if (!resolvedEmail) {
+    throw new Error('缺少邮箱地址，请先在侧边栏粘贴邮箱。');
+  }
+
+  return resolvedEmail;
+}
+
+async function prepareRegistrationPassword(state, resolvedEmail, stepLabel) {
+  if (resolvedEmail !== state.email) {
+    await setEmailState(resolvedEmail);
+  }
+
+  const latestState = await getState();
+  const password = latestState.customPassword || generatePassword();
+  await setPasswordState(password);
+
+  const accounts = latestState.accounts || [];
+  accounts.push({ email: resolvedEmail, password, createdAt: new Date().toISOString() });
+  await setState({ accounts });
+
+  await addLog(
+    `步骤 ${stepLabel}：正在填写邮箱 ${resolvedEmail}，密码为${latestState.customPassword ? '自定义' : '自动生成'}（${password.length} 位）`
+  );
+
+  return password;
+}
+
+async function executeStepA1() {
+  await addLog('步骤 A1：正在退出 ChatGPT 登录态并回到首页...');
+  await reuseOrCreateTab('signup-page', 'https://chatgpt.com/auth/logout');
+
+  await sendToContentScript('signup-page', {
+    type: 'EXECUTE_STEP',
+    step: 'A1',
+    source: 'background',
+    payload: {},
+  });
+}
+
+async function executeStepA2(state) {
+  const resolvedEmail = await resolveRegistrationEmail(state);
+  if (resolvedEmail !== state.email) {
+    await setEmailState(resolvedEmail);
+  }
+
+  await addLog(`步骤 A2：正在填写注册邮箱 ${resolvedEmail}...`);
+  await sendToContentScript('signup-page', {
+    type: 'EXECUTE_STEP',
+    step: 'A2',
+    source: 'background',
+    payload: { email: resolvedEmail },
+  });
+}
+
+async function executeStepA3(state) {
+  const resolvedEmail = await resolveRegistrationEmail(state);
+  const password = await prepareRegistrationPassword(state, resolvedEmail, 'A3');
+
+  await sendToContentScript('signup-page', {
+    type: 'EXECUTE_STEP',
+    step: 'A3',
+    source: 'background',
+    payload: { password },
+  });
+}
+
 async function executeStep2(state) {
   if (!state.oauthUrl) {
     throw new Error('缺少 OAuth 链接，请先完成步骤 1。');
@@ -4480,47 +4862,129 @@ async function executeStep2(state) {
 // ============================================================
 
 async function executeStep3(state) {
-  let resolvedEmail = state.email;
-  if (isHotmailProvider(state)) {
-    const account = await ensureHotmailAccountForFlow({
-      allowAllocate: true,
-      markUsed: true,
-      preferredAccountId: state.currentHotmailAccountId || null,
-    });
-    resolvedEmail = account.email;
-  } else if (isGeneratedAliasProvider(state.mailProvider)) {
-    resolvedEmail = buildGeneratedAliasEmail(state);
-  }
-
-  if (!resolvedEmail) {
-    throw new Error('缺少邮箱地址，请先在侧边栏粘贴邮箱。');
-  }
-
-  const password = state.customPassword || generatePassword();
-  if (resolvedEmail !== state.email) {
-    await setEmailState(resolvedEmail);
-  }
-  await setPasswordState(password);
-
-  // Save account record
-  const accounts = state.accounts || [];
-  accounts.push({ email: resolvedEmail, password, createdAt: new Date().toISOString() });
-  await setState({ accounts });
-
-  await addLog(
-    `步骤 3：正在填写邮箱 ${resolvedEmail}，密码为${state.customPassword ? '自定义' : '自动生成'}（${password.length} 位）`
-  );
+  const preparedEmail = await resolveRegistrationEmail(state);
+  const preparedPassword = await prepareRegistrationPassword(state, preparedEmail, '3');
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
-    step: 3,
+    step: '3',
     source: 'background',
-    payload: { email: resolvedEmail, password },
+    payload: { email: preparedEmail, password: preparedPassword },
   });
 }
 
 // ============================================================
 // Step 4: Get Signup Verification Code (qq-mail.js polls, then fills in signup-page.js)
 // ============================================================
+
+async function executeSignupVerificationStep(state, stepId = '4', options = {}) {
+  const { oauthRecoveryAttempt = 0 } = options;
+  const maxOauthRecoveryAttempts = 2;
+  const mail = getMailConfig(state);
+  if (mail.error) throw new Error(mail.error);
+  const stepStartedAt = Date.now();
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw new Error('认证页面标签页已关闭，无法继续注册验证码步骤。');
+  }
+
+  await chrome.tabs.update(signupTabId, { active: true });
+  throwIfStopped();
+  await addLog(`步骤 ${stepId}：正在确认注册验证码页面是否就绪，必要时自动恢复密码页超时报错...`);
+  const prepareResult = await sendToContentScriptResilient(
+    'signup-page',
+    {
+      type: 'PREPARE_SIGNUP_VERIFICATION',
+      step: stepId,
+      source: 'background',
+      payload: { password: state.password || state.customPassword || '' },
+    },
+    {
+      timeoutMs: 30000,
+      retryDelayMs: 700,
+      logMessage: `步骤 ${stepId}：认证页正在切换，等待页面重新就绪后继续检测...`,
+    }
+  );
+
+  if (prepareResult && prepareResult.error) {
+    throw new Error(prepareResult.error);
+  }
+  if (prepareResult?.verificationRequestedAt) {
+    await setState({ signupVerificationRequestedAt: prepareResult.verificationRequestedAt });
+  }
+  if (prepareResult?.alreadyVerified) {
+    await completeStepFromBackground(stepId, {});
+    return;
+  }
+  if (prepareResult?.recoverViaOauthEntry) {
+    if (stepId !== 'A4') {
+      throw new Error(`步骤 ${stepId} 收到了不支持的邮箱验证码页强跳信号。`);
+    }
+    if (oauthRecoveryAttempt >= maxOauthRecoveryAttempts) {
+      throw new Error(`步骤 ${stepId} 强制跳转邮箱验证码页已达到上限，当前 URL: ${prepareResult.redirectUrl || ''}`);
+    }
+
+    await addLog(
+      `步骤 ${stepId}：检测到步骤 3 提交后仍停留在密码页，正在内部重走步骤 1 和 2（${oauthRecoveryAttempt + 1}/${maxOauthRecoveryAttempts}）...`,
+      'warn'
+    );
+    const waitForFreshOAuth = waitForStepComplete('A1', 120000);
+    await executeStepA1(await getState());
+    await waitForFreshOAuth;
+
+    const waitForRegisterEntry = waitForStepComplete('A2', 120000);
+    await executeStepA2(await getState());
+    await waitForRegisterEntry;
+
+    await sleepWithStop(1500);
+    return executeSignupVerificationStep(await getState(), stepId, {
+      oauthRecoveryAttempt: oauthRecoveryAttempt + 1,
+    });
+
+    const redirectUrl = prepareResult.redirectUrl || 'https://auth.openai.com/email-verification';
+    await addLog(
+      `步骤 ${stepId}：检测到步骤 3 提交后仍停留在密码页，正在强制跳转到邮箱验证码页（${emailVerificationRedirectAttempt + 1}/${maxEmailVerificationRedirectAttempts}）：${redirectUrl}`,
+      'warn'
+    );
+    await reuseOrCreateTab('signup-page', redirectUrl);
+    return executeSignupVerificationStep(await getState(), stepId, {
+      emailVerificationRedirectAttempt: emailVerificationRedirectAttempt + 1,
+    });
+  }
+
+  throwIfStopped();
+  if (mail.provider === HOTMAIL_PROVIDER) {
+    await addLog(`步骤 ${stepId}：正在通过 ${mail.label} 轮询验证码...`);
+  } else {
+    await addLog(`步骤 ${stepId}：正在打开${mail.label}...`);
+
+    const alive = await isTabAlive(mail.source);
+    if (alive) {
+      if (mail.navigateOnReuse) {
+        await reuseOrCreateTab(mail.source, mail.url, {
+          inject: mail.inject,
+          injectSource: mail.injectSource,
+        });
+      } else {
+        const tabId = await getTabId(mail.source);
+        await chrome.tabs.update(tabId, { active: true });
+      }
+    } else {
+      await reuseOrCreateTab(mail.source, mail.url, {
+        inject: mail.inject,
+        injectSource: mail.injectSource,
+      });
+    }
+  }
+
+  await resolveVerificationStep(stepId, state, mail, {
+    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
+    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
+  });
+}
+
+async function executeStepA4(state) {
+  return executeSignupVerificationStep(state, 'A4');
+}
 
 function getMailConfig(state) {
   const provider = state.mailProvider || 'qq';
@@ -4578,15 +5042,15 @@ function normalizeInbucketOrigin(rawValue) {
 }
 
 function getVerificationCodeStateKey(step) {
-  return step === 4 ? 'lastSignupCode' : 'lastLoginCode';
+  return isSignupVerificationStep(step) ? 'lastSignupCode' : 'lastLoginCode';
 }
 
 function getVerificationCodeLabel(step) {
-  return step === 4 ? '注册' : '登录';
+  return isSignupVerificationStep(step) ? '注册' : '登录';
 }
 
 function getVerificationPollPayload(step, state, overrides = {}) {
-  if (step === 4) {
+  if (isSignupVerificationStep(step)) {
     return {
       filterAfterTimestamp: getHotmailVerificationRequestTimestamp(4, state),
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
@@ -4629,10 +5093,15 @@ async function requestVerificationCodeResend(step) {
     payload: {},
   });
 
-  if (step === 7) {
+  if (isLoginVerificationStep(step)) {
     const restartError = getStep7RestartFromStep6Error(result);
     if (restartError) {
       throw restartError;
+    }
+
+    const restartCurrentAttemptError = getRestartCurrentAttemptError(result);
+    if (restartCurrentAttemptError) {
+      throw restartCurrentAttemptError;
     }
   }
 
@@ -4735,7 +5204,7 @@ async function submitVerificationCode(step, code) {
     payload: { code },
   });
 
-  if (step === 7) {
+  if (isLoginVerificationStep(step)) {
     const restartError = getStep7RestartFromStep6Error(result);
     if (restartError) {
       throw restartError;
@@ -4771,7 +5240,7 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
       await requestVerificationCodeResend(step);
       await addLog(`步骤 ${step}：已先请求一封新的${getVerificationCodeLabel(step)}验证码，再开始轮询邮箱。`, 'warn');
     } catch (err) {
-      if (isStopError(err) || (step === 7 && isStep7RestartFromStep6Error(err))) {
+      if (isStopError(err) || (isLoginVerificationStep(step) && isStep7RestartFromStep6Error(err))) {
         throw err;
       }
       await addLog(`步骤 ${step}：首次重新获取验证码失败：${err.message}，将继续使用当前时间窗口轮询。`, 'warn');
@@ -4824,92 +5293,36 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
 }
 
 async function executeStep4(state) {
-  const mail = getMailConfig(state);
-  if (mail.error) throw new Error(mail.error);
-  const stepStartedAt = Date.now();
-  const signupTabId = await getTabId('signup-page');
-  if (!signupTabId) {
-    throw new Error('认证页面标签页已关闭，无法继续步骤 4。');
-  }
-
-  await chrome.tabs.update(signupTabId, { active: true });
-  throwIfStopped();
-  await addLog('步骤 4：正在确认注册验证码页面是否就绪，必要时自动恢复密码页超时报错...');
-  const prepareResult = await sendToContentScriptResilient(
-    'signup-page',
-    {
-      type: 'PREPARE_SIGNUP_VERIFICATION',
-      step: 4,
-      source: 'background',
-      payload: { password: state.password || state.customPassword || '' },
-    },
-    {
-      timeoutMs: 30000,
-      retryDelayMs: 700,
-      logMessage: '步骤 4：认证页正在切换，等待页面重新就绪后继续检测...',
-    }
-  );
-
-  if (prepareResult && prepareResult.error) {
-    throw new Error(prepareResult.error);
-  }
-  if (prepareResult?.verificationRequestedAt) {
-    await setState({ loginVerificationRequestedAt: prepareResult.verificationRequestedAt });
-  }
-  if (prepareResult?.alreadyVerified) {
-    await completeStepFromBackground(4, {});
-    return;
-  }
-
-  throwIfStopped();
-  if (mail.provider === HOTMAIL_PROVIDER) {
-    await addLog(`步骤 4：正在通过 ${mail.label} 轮询验证码...`);
-  } else {
-    await addLog(`步骤 4：正在打开${mail.label}...`);
-
-    // For mail tabs, only create if not alive — don't navigate (preserves login session)
-    const alive = await isTabAlive(mail.source);
-    if (alive) {
-      if (mail.navigateOnReuse) {
-        await reuseOrCreateTab(mail.source, mail.url, {
-          inject: mail.inject,
-          injectSource: mail.injectSource,
-        });
-      } else {
-        const tabId = await getTabId(mail.source);
-        await chrome.tabs.update(tabId, { active: true });
-      }
-    } else {
-      await reuseOrCreateTab(mail.source, mail.url, {
-        inject: mail.inject,
-        injectSource: mail.injectSource,
-      });
-    }
-  }
-
-  await resolveVerificationStep(4, state, mail, {
-    filterAfterTimestamp: mail.provider === HOTMAIL_PROVIDER ? undefined : stepStartedAt,
-    requestFreshCodeFirst: mail.provider === HOTMAIL_PROVIDER ? false : true,
-  });
-  return;
+  return executeSignupVerificationStep(state, '4');
 }
 
 // ============================================================
 // Step 5: Fill Name & Birthday (via signup-page.js)
 // ============================================================
 
-async function executeStep5(state) {
+async function executeSignupProfileStep(stepId) {
   const { firstName, lastName } = generateRandomName();
   const { year, month, day } = generateRandomBirthday();
+  const payload = { firstName, lastName, year, month, day };
 
-  await addLog(`步骤 5：已生成姓名 ${firstName} ${lastName}，生日 ${year}-${month}-${day}`);
+  await setState({ signupProfileDraft: payload });
+
+  await addLog(`步骤 ${stepId}：已生成姓名 ${firstName} ${lastName}，生日 ${year}-${month}-${day}`);
 
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
-    step: 5,
+    step: stepId,
     source: 'background',
-    payload: { firstName, lastName, year, month, day },
+    payload,
   });
+}
+
+async function executeStepA5() {
+  return executeSignupProfileStep('A5');
+}
+
+async function executeStep5(state) {
+  return executeSignupProfileStep('5');
 }
 
 // ============================================================
@@ -4985,6 +5398,11 @@ async function runStep7Attempt(state) {
   const restartError = getStep7RestartFromStep6Error(prepareResult);
   if (restartError) {
     throw restartError;
+  }
+
+  const restartCurrentAttemptError = getRestartCurrentAttemptError(prepareResult);
+  if (restartCurrentAttemptError) {
+    throw restartCurrentAttemptError;
   }
 
   if (prepareResult && prepareResult.error) {
@@ -5157,7 +5575,7 @@ async function waitForStep8Ready(tabId, timeoutMs = STEP8_READY_WAIT_TIMEOUT_MS)
     throwIfStopped();
     const pageState = await getStep8PageState(tabId);
     if (pageState?.addPhonePage) {
-      throw new Error('步骤 8：认证页进入了手机号页面，当前不是 OAuth 同意页，无法继续自动授权。');
+      throw createRestartCurrentAttemptError({ reason: 'add_phone_page', url: pageState.url || '' });
     }
     if (pageState?.consentReady) {
       return pageState;
@@ -5285,7 +5703,7 @@ async function waitForStep8ClickEffect(tabId, baselineUrl, timeoutMs = STEP8_CLI
 
     const pageState = await getStep8PageState(tabId);
     if (pageState?.addPhonePage) {
-      throw new Error('步骤 8：点击“继续”后页面跳到了手机号页面，当前流程无法继续自动授权。');
+      throw createRestartCurrentAttemptError({ reason: 'add_phone_page', url: pageState.url || '' });
     }
     if (pageState === null) {
       if (!recovered) {

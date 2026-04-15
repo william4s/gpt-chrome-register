@@ -75,7 +75,7 @@
     </div>
   </header>
 
-  <section id="update-section" hidden>
+  <section id="update-section" hidden style="display:none;">
     <div class="update-card">
       <div class="update-card-header">
         <div class="update-card-copy">
@@ -97,6 +97,13 @@
           <option value="cpa">CPA 面板</option>
           <option value="sub2api">SUB2API</option>
         </select>
+      </div>
+      <div class="data-row" id="row-registration-mode">
+        <span class="data-label">注册模式</span>
+        <div id="registration-mode-group" class="choice-group" role="group" aria-label="注册模式">
+          <button type="button" class="choice-btn" data-registration-mode="oauth">OAuth注册</button>
+          <button type="button" class="choice-btn" data-registration-mode="gpt">GPT注册</button>
+        </div>
       </div>
       <div class="data-row" id="row-vps-url">
         <span class="data-label">CPA</span>
@@ -169,6 +176,17 @@
           <option value="duck">DuckDuckGo</option>
           <option value="cloudflare">Cloudflare</option>
         </select>
+      </div>
+      <div class="data-row" id="row-custom-email-alias-mode" style="display:none;">
+        <span class="data-label">自定义模式</span>
+        <div id="custom-email-alias-mode-group" class="choice-group" role="group" aria-label="自定义邮箱模式">
+          <button type="button" class="choice-btn" data-custom-email-alias-mode="full">完整邮箱</button>
+          <button type="button" class="choice-btn" data-custom-email-alias-mode="alias">别名生成</button>
+        </div>
+      </div>
+      <div class="data-row" id="row-email-suffix" style="display:none;">
+        <span class="data-label" id="label-email-suffix">邮箱后缀</span>
+        <input type="text" id="input-email-suffix" class="data-input" placeholder="例如 @gmail.com" />
       </div>
       <div class="data-row" id="row-cf-domain" style="display:none;">
         <span class="data-label">CF 域名</span>
@@ -348,6 +366,31 @@
       <span id="steps-progress" class="steps-progress">0 / 9</span>
     </div>
     <div class="steps-list">
+      <div class="step-row" data-step="A1" style="display:none;">
+        <div class="step-indicator" data-step="A1"><span class="step-num">A1</span></div>
+        <button class="step-btn" data-step="A1">退出登录并点击注册</button>
+        <span class="step-status" data-step="A1"></span>
+      </div>
+      <div class="step-row" data-step="A2" style="display:none;">
+        <div class="step-indicator" data-step="A2"><span class="step-num">A2</span></div>
+        <button class="step-btn" data-step="A2">填写注册邮箱</button>
+        <span class="step-status" data-step="A2"></span>
+      </div>
+      <div class="step-row" data-step="A3" style="display:none;">
+        <div class="step-indicator" data-step="A3"><span class="step-num">A3</span></div>
+        <button class="step-btn" data-step="A3">填写注册密码</button>
+        <span class="step-status" data-step="A3"></span>
+      </div>
+      <div class="step-row" data-step="A4" style="display:none;">
+        <div class="step-indicator" data-step="A4"><span class="step-num">A4</span></div>
+        <button class="step-btn" data-step="A4">获取注册验证码</button>
+        <span class="step-status" data-step="A4"></span>
+      </div>
+      <div class="step-row" data-step="A5" style="display:none;">
+        <div class="step-indicator" data-step="A5"><span class="step-num">A5</span></div>
+        <button class="step-btn" data-step="A5">填写姓名年龄并创建账号</button>
+        <span class="step-status" data-step="A5"></span>
+      </div>
       <div class="step-row" data-step="1">
         <div class="step-indicator" data-step="1"><span class="step-num">1</span></div>
         <button class="step-btn" data-step="1">获取 OAuth 链接</button>

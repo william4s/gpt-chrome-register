@@ -17,29 +17,31 @@ if (!isTopFrame) {
   console.log(MAIL163_PREFIX, 'Skipping child frame');
 } else {
 
-// Track codes we've already seen — persisted in chrome.storage.session to survive script re-injection
-let seenCodes = new Set();
+const SEEN_MAIL_STORAGE_KEY = 'seen163MailKeys';
 
-async function loadSeenCodes() {
+// Track 163 emails we've already consumed — persisted in chrome.storage.session to survive script re-injection
+let seenMailKeys = new Set();
+
+async function loadSeenMailKeys() {
   try {
-    const data = await chrome.storage.session.get('seenCodes');
-    if (data.seenCodes && Array.isArray(data.seenCodes)) {
-      seenCodes = new Set(data.seenCodes);
-      console.log(MAIL163_PREFIX, `Loaded ${seenCodes.size} previously seen codes`);
+    const data = await chrome.storage.session.get(SEEN_MAIL_STORAGE_KEY);
+    if (data[SEEN_MAIL_STORAGE_KEY] && Array.isArray(data[SEEN_MAIL_STORAGE_KEY])) {
+      seenMailKeys = new Set(data[SEEN_MAIL_STORAGE_KEY]);
+      console.log(MAIL163_PREFIX, `Loaded ${seenMailKeys.size} previously seen mail keys`);
     }
   } catch (err) {
-    console.warn(MAIL163_PREFIX, 'Session storage unavailable, using in-memory seen codes:', err?.message || err);
+    console.warn(MAIL163_PREFIX, 'Session storage unavailable, using in-memory seen mail keys:', err?.message || err);
   }
 }
 
-// Load previously seen codes on startup
-loadSeenCodes();
+// Load previously seen mail keys on startup
+loadSeenMailKeys();
 
-async function persistSeenCodes() {
+async function persistSeenMailKeys() {
   try {
-    await chrome.storage.session.set({ seenCodes: [...seenCodes] });
+    await chrome.storage.session.set({ [SEEN_MAIL_STORAGE_KEY]: [...seenMailKeys] });
   } catch (err) {
-    console.warn(MAIL163_PREFIX, 'Could not persist seen codes, continuing in-memory only:', err?.message || err);
+    console.warn(MAIL163_PREFIX, 'Could not persist seen mail keys, continuing in-memory only:', err?.message || err);
   }
 }
 
@@ -87,6 +89,16 @@ function normalizeMinuteTimestamp(timestamp) {
   const date = new Date(timestamp);
   date.setSeconds(0, 0);
   return date.getTime();
+}
+
+function buildSeenMailKey({ id, mailTimestamp, subject, code }) {
+  if (id) {
+    return `id:${id}`;
+  }
+  const normalizedTimestamp = Number.isFinite(mailTimestamp) && mailTimestamp > 0 ? mailTimestamp : 0;
+  const normalizedSubject = (subject || '').trim();
+  const normalizedCode = (code || '').trim();
+  return `fallback:${normalizedTimestamp}:${normalizedSubject}:${normalizedCode}`;
 }
 
 function parseMail163Timestamp(rawText) {
@@ -241,11 +253,12 @@ async function handlePollEmail(step, payload) {
 
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + ariaLabel);
+        const mailKey = code ? buildSeenMailKey({ id, mailTimestamp, subject, code }) : '';
         if (code && excludedCodeSet.has(code)) {
           log(`步骤 ${step}：跳过排除的验证码：${code}`, 'info');
-        } else if (code && !seenCodes.has(code)) {
-          seenCodes.add(code);
-          persistSeenCodes();
+        } else if (code && !seenMailKeys.has(mailKey)) {
+          seenMailKeys.add(mailKey);
+          persistSeenMailKeys();
           const source = useFallback && existingMailIds.has(id) ? '回退匹配邮件' : '新邮件';
           const timeLabel = mailTimestamp ? `，时间：${new Date(mailTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
           log(`步骤 ${step}：已找到验证码：${code}（来源：${source}${timeLabel}，主题：${subject.slice(0, 40)}）`, 'ok');
@@ -254,8 +267,8 @@ async function handlePollEmail(step, payload) {
           scheduleEmailCleanup(item, step);
 
           return { ok: true, code, emailTimestamp: Date.now(), mailId: id };
-        } else if (code && seenCodes.has(code)) {
-          log(`步骤 ${step}：跳过已处理过的验证码：${code}`, 'info');
+        } else if (code && seenMailKeys.has(mailKey)) {
+          log(`步骤 ${step}：跳过已处理过的邮件验证码：${code}`, 'info');
         }
       }
     }

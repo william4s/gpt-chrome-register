@@ -25,6 +25,7 @@
   "content_scripts": [
     {
       "matches": [
+        "https://chatgpt.com/*",
         "https://auth0.openai.com/*",
         "https://auth.openai.com/*",
         "https://accounts.openai.com/*"

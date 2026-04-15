@@ -10,27 +10,29 @@ if (!isTopFrame) {
   console.log(MAIL2925_PREFIX, 'Skipping child frame');
 } else {
 
-let seenCodes = new Set();
+const SEEN_MAIL_STORAGE_KEY = 'seen2925MailKeys';
 
-async function loadSeenCodes() {
+let seenMailKeys = new Set();
+
+async function loadSeenMailKeys() {
   try {
-    const data = await chrome.storage.session.get('seen2925Codes');
-    if (data.seen2925Codes && Array.isArray(data.seen2925Codes)) {
-      seenCodes = new Set(data.seen2925Codes);
-      console.log(MAIL2925_PREFIX, `Loaded ${seenCodes.size} previously seen codes`);
+    const data = await chrome.storage.session.get(SEEN_MAIL_STORAGE_KEY);
+    if (data[SEEN_MAIL_STORAGE_KEY] && Array.isArray(data[SEEN_MAIL_STORAGE_KEY])) {
+      seenMailKeys = new Set(data[SEEN_MAIL_STORAGE_KEY]);
+      console.log(MAIL2925_PREFIX, `Loaded ${seenMailKeys.size} previously seen mail keys`);
     }
   } catch (err) {
-    console.warn(MAIL2925_PREFIX, 'Session storage unavailable, using in-memory seen codes:', err?.message || err);
+    console.warn(MAIL2925_PREFIX, 'Session storage unavailable, using in-memory seen mail keys:', err?.message || err);
   }
 }
 
-loadSeenCodes();
+loadSeenMailKeys();
 
-async function persistSeenCodes() {
+async function persistSeenMailKeys() {
   try {
-    await chrome.storage.session.set({ seen2925Codes: [...seenCodes] });
+    await chrome.storage.session.set({ [SEEN_MAIL_STORAGE_KEY]: [...seenMailKeys] });
   } catch (err) {
-    console.warn(MAIL2925_PREFIX, 'Could not persist seen codes, continuing in-memory only:', err?.message || err);
+    console.warn(MAIL2925_PREFIX, 'Could not persist seen mail keys, continuing in-memory only:', err?.message || err);
   }
 }
 
@@ -125,6 +127,16 @@ function getCurrentMailIds(items = []) {
     ids.add(getMailItemId(item, index));
   });
   return ids;
+}
+
+function buildSeenMailKey({ itemId, itemTimestamp, text, code }) {
+  if (itemId) {
+    return `id:${itemId}`;
+  }
+  const normalizedTimestamp = Number.isFinite(itemTimestamp) && itemTimestamp > 0 ? itemTimestamp : 0;
+  const normalizedText = normalizeMailIdentityPart(text).slice(0, 240);
+  const normalizedCode = (code || '').trim();
+  return `fallback:${normalizedTimestamp}:${normalizedText}:${normalizedCode}`;
 }
 
 function normalizeMinuteTimestamp(timestamp) {
@@ -374,17 +386,18 @@ async function handlePollEmail(step, payload) {
         }
 
         const code = extractVerificationCode(text, strictChatGPTCodeOnly);
+        const previewMailKey = code ? buildSeenMailKey({ itemId, itemTimestamp, text, code }) : '';
         if (code && previewMatchesTarget) {
           if (excludedCodeSet.has(code)) {
             log(`步骤 ${step}：跳过排除的验证码：${code}`, 'info');
             continue;
           }
-          if (seenCodes.has(code)) {
-            log(`步骤 ${step}：跳过已处理过的验证码：${code}`, 'info');
+          if (seenMailKeys.has(previewMailKey)) {
+            log(`步骤 ${step}：跳过已处理过的邮件验证码：${code}`, 'info');
             continue;
           }
-          seenCodes.add(code);
-          persistSeenCodes();
+          seenMailKeys.add(previewMailKey);
+          persistSeenMailKeys();
           const source = useFallback && existingMailIds.has(itemId) ? '回退匹配邮件' : '新邮件';
           const timeLabel = itemTimestamp ? `，时间：${new Date(itemTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
           log(`步骤 ${step}：已找到验证码：${code}（来源：${source}${timeLabel}）`, 'ok');
@@ -401,16 +414,17 @@ async function handlePollEmail(step, payload) {
           continue;
         }
         if (bodyCode) {
+          const bodyMailKey = buildSeenMailKey({ itemId, itemTimestamp, text: openedText || text, code: bodyCode });
           if (excludedCodeSet.has(bodyCode)) {
             log(`步骤 ${step}：跳过排除的验证码：${bodyCode}`, 'info');
             continue;
           }
-          if (seenCodes.has(bodyCode)) {
-            log(`步骤 ${step}：跳过已处理过的验证码：${bodyCode}`, 'info');
+          if (seenMailKeys.has(bodyMailKey)) {
+            log(`步骤 ${step}：跳过已处理过的邮件验证码：${bodyCode}`, 'info');
             continue;
           }
-          seenCodes.add(bodyCode);
-          persistSeenCodes();
+          seenMailKeys.add(bodyMailKey);
+          persistSeenMailKeys();
           const source = useFallback && existingMailIds.has(itemId) ? '回退匹配邮件正文' : '新邮件正文';
           const timeLabel = itemTimestamp ? `，时间：${new Date(itemTimestamp).toLocaleString('zh-CN', { hour12: false })}` : '';
           log(`步骤 ${step}：已在邮件正文中找到验证码：${bodyCode}（来源：${source}${timeLabel}）`, 'ok');

@@ -55,7 +55,10 @@ const bundle = [
   extractFunction('throwIfStopped'),
   extractFunction('isStopError'),
   extractFunction('isStepDoneStatus'),
+  extractFunction('getErrorMessage'),
   extractFunction('isRestartCurrentAttemptError'),
+  extractFunction('normalizeRegistrationMode'),
+  extractFunction('getOrderedStepIds'),
   extractFunction('getFirstUnfinishedStep'),
   extractFunction('hasSavedProgress'),
   extractFunction('getRunningSteps'),
@@ -64,19 +67,16 @@ const bundle = [
 ].join('\n');
 
 const api = new Function(`
+const REGISTRATION_MODE_OAUTH = 'oauth';
+const REGISTRATION_MODE_GPT = 'gpt';
+const OAUTH_STEP_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const GPT_STEP_ORDER = ['A1', 'A2', 'A3', 'A4', 'A5', '1', '6', '7', '8', '9'];
+const ALL_STEP_IDS = [...new Set([...GPT_STEP_ORDER, ...OAUTH_STEP_ORDER])];
+const DEFAULT_STEP_STATUSES = Object.fromEntries(ALL_STEP_IDS.map((stepId) => [stepId, 'pending']));
 const STOP_ERROR_MESSAGE = 'Flow stopped.';
 const DEFAULT_STATE = {
-  stepStatuses: {
-    1: 'pending',
-    2: 'pending',
-    3: 'pending',
-    4: 'pending',
-    5: 'pending',
-    6: 'pending',
-    7: 'pending',
-    8: 'pending',
-    9: 'pending',
-  },
+  registrationMode: REGISTRATION_MODE_OAUTH,
+  stepStatuses: { ...DEFAULT_STEP_STATUSES },
 };
 
 let stopRequested = false;
@@ -85,12 +85,15 @@ let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
 let autoRunAttemptRun = 0;
 let runCalls = 0;
+const AUTO_RUN_MAX_RETRIES_PER_ROUND = 2;
+const AUTO_RUN_RETRY_DELAY_MS = 1000;
 
 const logs = [];
 const broadcasts = [];
 let currentState = {
   ...DEFAULT_STATE,
   stepStatuses: { ...DEFAULT_STATE.stepStatuses },
+  email: 'manual@example.com',
   vpsUrl: 'https://example.com/vps',
   vpsPassword: 'secret',
   customPassword: '',
@@ -100,7 +103,8 @@ let currentState = {
   autoRunDelayMinutes: 30,
   autoStepDelaySeconds: null,
   mailProvider: '163',
-  emailGenerator: 'duck',
+  emailGenerator: 'custom',
+  customEmailAliasMode: false,
   emailPrefix: 'demo',
   inbucketHost: '',
   inbucketMailbox: '',
@@ -177,9 +181,33 @@ async function waitForRunningStepsToFinish() {
 }
 async function broadcastStopToContentScripts() {}
 function cancelPendingCommands() {}
+function shouldUseCustomRegistrationEmail(state = {}) {
+  return state.mailProvider !== 'hotmail-api'
+    && state.mailProvider !== '2925'
+    && state.emailGenerator === 'custom'
+    && !state.customEmailAliasMode;
+}
 function normalizeAutoRunFallbackThreadIntervalMinutes(value) {
   return Math.max(0, Math.floor(Number(value) || 0));
 }
+function buildAutoRunRoundSummaries(totalRuns, existing = []) {
+  return Array.from({ length: totalRuns }, (_, index) => {
+    const current = existing[index] || {};
+    return {
+      status: current.status || 'pending',
+      attempts: current.attempts || 0,
+      failureReasons: [...(current.failureReasons || [])],
+      finalFailureReason: current.finalFailureReason || '',
+    };
+  });
+}
+function serializeAutoRunRoundSummaries(totalRuns, roundSummaries) {
+  return roundSummaries.slice(0, totalRuns).map((item) => ({
+    ...item,
+    failureReasons: [...(item.failureReasons || [])],
+  }));
+}
+async function logAutoRunFinalSummary() {}
 
 const chrome = {
   runtime: {
@@ -226,6 +254,7 @@ ${bundle}
 
 return {
   autoRunLoop,
+  isRestartCurrentAttemptError,
   snapshot() {
     return {
       runCalls,
@@ -242,6 +271,17 @@ return {
 `)();
 
 (async () => {
+  assert.strictEqual(
+    api.isRestartCurrentAttemptError(new Error('STEP7_RESTART_CURRENT_ATTEMPT::max_check_attempts_error_page::https://auth.openai.com/log-in')),
+    true,
+    '步骤 7 的 max_check_attempts 错误页应触发整轮重开'
+  );
+  assert.strictEqual(
+    api.isRestartCurrentAttemptError(new Error('当前邮箱已存在，需要重新开始新一轮。')),
+    true,
+    '邮箱已存在分支仍应触发整轮重开'
+  );
+
   await api.autoRunLoop(2, { autoRunSkipFailures: false, mode: 'restart' });
 
   const snapshot = api.snapshot();
@@ -249,6 +289,7 @@ return {
   assert.strictEqual(snapshot.currentState.autoRunPhase, 'complete', 'both runs should complete after reset');
   assert.strictEqual(snapshot.currentState.autoRunCurrentRun, 2, 'final run index should be recorded');
   assert.strictEqual(snapshot.autoRunActive, false, 'auto-run should exit active state after completion');
+  assert.strictEqual(snapshot.currentState.email, 'manual@example.com', 'fresh auto-run attempt should preserve manually entered full email');
 
   console.log('auto-run fresh attempt reset tests passed');
 })().catch((error) => {

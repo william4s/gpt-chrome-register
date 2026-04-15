@@ -50,6 +50,8 @@ const btnExportSettings = document.getElementById('btn-export-settings');
 const btnImportSettings = document.getElementById('btn-import-settings');
 const inputImportSettingsFile = document.getElementById('input-import-settings-file');
 const selectPanelMode = document.getElementById('select-panel-mode');
+const rowRegistrationMode = document.getElementById('row-registration-mode');
+const registrationModeButtons = Array.from(document.querySelectorAll('[data-registration-mode]'));
 const rowVpsUrl = document.getElementById('row-vps-url');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const rowVpsPassword = document.getElementById('row-vps-password');
@@ -68,6 +70,12 @@ const selectMailProvider = document.getElementById('select-mail-provider');
 const btnMailLogin = document.getElementById('btn-mail-login');
 const rowEmailGenerator = document.getElementById('row-email-generator');
 const selectEmailGenerator = document.getElementById('select-email-generator');
+const rowCustomEmailAliasMode = document.getElementById('row-custom-email-alias-mode');
+const customEmailAliasModeGroup = document.getElementById('custom-email-alias-mode-group');
+const customEmailAliasModeButtons = Array.from(document.querySelectorAll('[data-custom-email-alias-mode]'));
+const rowEmailSuffix = document.getElementById('row-email-suffix');
+const labelEmailSuffix = document.getElementById('label-email-suffix');
+const inputEmailSuffix = document.getElementById('input-email-suffix');
 const hotmailSection = document.getElementById('hotmail-section');
 const rowHotmailServiceMode = document.getElementById('row-hotmail-service-mode');
 const hotmailServiceModeButtons = Array.from(document.querySelectorAll('[data-hotmail-service-mode]'));
@@ -116,18 +124,13 @@ const btnAutoStartCancel = document.getElementById('btn-auto-start-cancel');
 const btnAutoStartRestart = document.getElementById('btn-auto-start-restart');
 const btnAutoStartContinue = document.getElementById('btn-auto-start-continue');
 const autoHintText = document.querySelector('.auto-hint');
-const STEP_DEFAULT_STATUSES = {
-  1: 'pending',
-  2: 'pending',
-  3: 'pending',
-  4: 'pending',
-  5: 'pending',
-  6: 'pending',
-  7: 'pending',
-  8: 'pending',
-  9: 'pending',
-};
-const SKIPPABLE_STEPS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+const REGISTRATION_MODE_OAUTH = 'oauth';
+const REGISTRATION_MODE_GPT = 'gpt';
+const OAUTH_STEP_ORDER = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const GPT_STEP_ORDER = ['A1', 'A2', 'A3', 'A4', 'A5', '1', '6', '7', '8', '9'];
+const ALL_STEP_IDS = [...new Set([...GPT_STEP_ORDER, ...OAUTH_STEP_ORDER])];
+const STEP_DEFAULT_STATUSES = Object.fromEntries(ALL_STEP_IDS.map((stepId) => [stepId, 'pending']));
+const SKIPPABLE_STEPS = new Set(ALL_STEP_IDS);
 const AUTO_DELAY_MIN_MINUTES = 1;
 const AUTO_DELAY_MAX_MINUTES = 1440;
 const AUTO_DELAY_DEFAULT_MINUTES = 30;
@@ -155,7 +158,10 @@ let currentAutoRun = {
 };
 let settingsDirty = false;
 let settingsSaveInFlight = false;
+let settingsSaveActiveCount = 0;
+let settingsSaveRequestSeq = 0;
 let settingsAutoSaveTimer = null;
+let currentCustomEmailAliasMode = false;
 let cloudflareDomainEditMode = false;
 let modalChoiceResolver = null;
 let currentModalActions = [];
@@ -536,7 +542,7 @@ function getStepStatuses(state = latestState) {
 
 function getFirstUnfinishedStep(state = latestState) {
   const statuses = getStepStatuses(state);
-  for (let step = 1; step <= 9; step++) {
+  for (const step of getCurrentStepOrder(state)) {
     if (!isDoneStatus(statuses[step])) {
       return step;
     }
@@ -546,15 +552,12 @@ function getFirstUnfinishedStep(state = latestState) {
 
 function getRunningSteps(state = latestState) {
   const statuses = getStepStatuses(state);
-  return Object.entries(statuses)
-    .filter(([, status]) => status === 'running')
-    .map(([step]) => Number(step))
-    .sort((a, b) => a - b);
+  return getCurrentStepOrder(state).filter((step) => statuses[step] === 'running');
 }
 
 function hasSavedProgress(state = latestState) {
   const statuses = getStepStatuses(state);
-  return Object.values(statuses).some((status) => status !== 'pending');
+  return getCurrentStepOrder(state).some((step) => statuses[step] !== 'pending');
 }
 
 function shouldOfferAutoModeChoice(state = latestState) {
@@ -827,6 +830,7 @@ function collectSettingsPayload() {
   ) || activeDomain;
   return {
     panelMode: selectPanelMode.value,
+    registrationMode: getSelectedRegistrationMode(),
     vpsUrl: inputVpsUrl.value.trim(),
     vpsPassword: inputVpsPassword.value,
     localCpaStep9Mode: getSelectedLocalCpaStep9Mode(),
@@ -838,6 +842,8 @@ function collectSettingsPayload() {
     mailProvider: selectMailProvider.value,
     emailGenerator: selectEmailGenerator.value,
     emailPrefix: inputEmailPrefix.value.trim(),
+    emailSuffix: normalizeCustomEmailSuffixValue(inputEmailSuffix.value),
+    customEmailAliasMode: getSelectedCustomEmailAliasMode(),
     inbucketHost: inputInbucketHost.value.trim(),
     inbucketMailbox: inputInbucketMailbox.value.trim(),
     hotmailServiceMode: getSelectedHotmailServiceMode(),
@@ -861,6 +867,65 @@ function normalizeLocalCpaStep9Mode(value = '') {
 
 function normalizeHotmailServiceMode(value = '') {
   return HOTMAIL_SERVICE_MODE_LOCAL;
+}
+
+function normalizeCustomEmailAliasMode(value = '') {
+  if (value === true || value === false) {
+    return value;
+  }
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'alias' || normalized === 'true' || normalized === '1';
+}
+
+function normalizeCustomEmailSuffixValue(value = '') {
+  const normalized = String(value || '').trim().replace(/^@+/, '');
+  return normalized ? `@${normalized}` : '';
+}
+
+function normalizeStepId(step) {
+  const value = String(step ?? '').trim();
+  if (/^a[1-5]$/i.test(value)) {
+    return value.toUpperCase();
+  }
+  if (/^[1-9]$/.test(value)) {
+    return value;
+  }
+  return value.toUpperCase();
+}
+
+function normalizeRegistrationMode(value = '') {
+  return String(value || '').trim().toLowerCase() === REGISTRATION_MODE_GPT
+    ? REGISTRATION_MODE_GPT
+    : REGISTRATION_MODE_OAUTH;
+}
+
+function getCurrentRegistrationMode(state = latestState) {
+  return normalizeRegistrationMode(state?.registrationMode);
+}
+
+function getCurrentStepOrder(state = latestState) {
+  return getCurrentRegistrationMode(state) === REGISTRATION_MODE_GPT
+    ? GPT_STEP_ORDER
+    : OAUTH_STEP_ORDER;
+}
+
+function getLastStepId(state = latestState) {
+  const steps = getCurrentStepOrder(state);
+  return steps[steps.length - 1] || null;
+}
+
+function getSelectedRegistrationMode() {
+  const activeButton = registrationModeButtons.find((button) => button.classList.contains('is-active'));
+  return normalizeRegistrationMode(activeButton?.dataset.registrationMode);
+}
+
+function setRegistrationMode(mode) {
+  const resolvedMode = normalizeRegistrationMode(mode);
+  registrationModeButtons.forEach((button) => {
+    const active = button.dataset.registrationMode === resolvedMode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
 }
 
 function getSelectedLocalCpaStep9Mode() {
@@ -892,6 +957,53 @@ function setHotmailServiceMode(mode) {
     button.classList.toggle('is-active', active);
     button.setAttribute('aria-pressed', String(active));
   });
+}
+
+function getSelectedCustomEmailAliasMode() {
+  const activeButton = customEmailAliasModeButtons.find((button) => button.classList.contains('is-active'));
+  if (activeButton) {
+    return normalizeCustomEmailAliasMode(activeButton.dataset.customEmailAliasMode);
+  }
+  return currentCustomEmailAliasMode;
+}
+
+function setCustomEmailAliasMode(enabled) {
+  currentCustomEmailAliasMode = normalizeCustomEmailAliasMode(enabled);
+  const resolvedMode = currentCustomEmailAliasMode ? 'alias' : 'full';
+  customEmailAliasModeButtons.forEach((button) => {
+    const active = button.dataset.customEmailAliasMode === resolvedMode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function handleCustomEmailAliasModeChange(nextMode) {
+  const nextAliasMode = normalizeCustomEmailAliasMode(nextMode);
+  if (getSelectedCustomEmailAliasMode() === nextAliasMode) {
+    return;
+  }
+  setCustomEmailAliasMode(nextMode);
+  updateMailProviderUI();
+  if (nextAliasMode) {
+    clearRegistrationEmail({ silent: true }).catch(() => { });
+  }
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+}
+
+function setDataRowVisible(row, visible) {
+  if (!row) {
+    return;
+  }
+  row.style.display = visible ? 'flex' : 'none';
+}
+
+function getPendingManualRegistrationEmail() {
+  const email = String(inputEmail.value || '').trim();
+  if (!email || inputEmail.readOnly) {
+    return '';
+  }
+  return email;
 }
 
 function setSettingsCardLocked(locked) {
@@ -963,7 +1075,10 @@ async function saveSettings(options = {}) {
   }
 
   const payload = collectSettingsPayload();
-  settingsSaveInFlight = true;
+  const pendingManualEmail = getPendingManualRegistrationEmail();
+  const requestSeq = ++settingsSaveRequestSeq;
+  settingsSaveActiveCount += 1;
+  settingsSaveInFlight = settingsSaveActiveCount > 0;
   updateSaveButtonState();
 
   try {
@@ -977,8 +1092,22 @@ async function saveSettings(options = {}) {
       throw new Error(response.error);
     }
 
+    if (requestSeq !== settingsSaveRequestSeq) {
+      return;
+    }
+
     if (response?.state) {
-      applySettingsState(response.state);
+      const nextState = { ...response.state };
+      if (payload.emailGenerator === 'custom') {
+        nextState.emailGenerator = payload.emailGenerator;
+        nextState.customEmailAliasMode = payload.customEmailAliasMode;
+        nextState.emailPrefix = payload.emailPrefix;
+        nextState.emailSuffix = payload.emailSuffix;
+      }
+      if (pendingManualEmail) {
+        nextState.email = pendingManualEmail;
+      }
+      applySettingsState(nextState);
     } else {
       syncLatestState(payload);
       markSettingsDirty(false);
@@ -990,13 +1119,17 @@ async function saveSettings(options = {}) {
       showToast('配置已保存', 'success', 1800);
     }
   } catch (err) {
+    if (requestSeq !== settingsSaveRequestSeq) {
+      return;
+    }
     markSettingsDirty(true);
     if (!silent) {
       showToast(`保存失败：${err.message}`, 'error');
     }
     throw err;
   } finally {
-    settingsSaveInFlight = false;
+    settingsSaveActiveCount = Math.max(0, settingsSaveActiveCount - 1);
+    settingsSaveInFlight = settingsSaveActiveCount > 0;
     updateSaveButtonState();
   }
 }
@@ -1015,7 +1148,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
   btnAutoRun.disabled = currentAutoRun.autoRunning;
   btnFetchEmail.disabled = locked
     || usesGeneratedAliasMailProvider(selectMailProvider.value)
-    || isCustomEmailGeneratorSelected();
+    || isCustomEmailFullModeSelected();
   inputEmail.disabled = locked;
   inputAutoSkipFailures.disabled = true;
 
@@ -1050,7 +1183,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
       inputEmail.disabled = false;
       if (!locked) {
         btnFetchEmail.disabled = usesGeneratedAliasMailProvider(selectMailProvider.value)
-          || isCustomEmailGeneratorSelected();
+          || isCustomEmailFullModeSelected();
       }
       break;
   }
@@ -1064,7 +1197,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
 
 function initializeManualStepActions() {
   document.querySelectorAll('.step-row').forEach((row) => {
-    const step = Number(row.dataset.step);
+    const step = normalizeStepId(row.dataset.step);
     const statusEl = row.querySelector('.step-status');
     if (!statusEl) return;
 
@@ -1074,7 +1207,7 @@ function initializeManualStepActions() {
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.className = 'step-manual-btn';
-    manualBtn.dataset.step = String(step);
+    manualBtn.dataset.step = step;
     manualBtn.title = '跳过此步';
     manualBtn.setAttribute('aria-label', `跳过步骤 ${step}`);
     manualBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>';
@@ -1105,6 +1238,7 @@ function applySettingsState(state) {
   syncPasswordField(state || {});
   inputVpsUrl.value = state?.vpsUrl || '';
   inputVpsPassword.value = state?.vpsPassword || '';
+  setRegistrationMode(state?.registrationMode);
   setLocalCpaStep9Mode(state?.localCpaStep9Mode);
   selectPanelMode.value = state?.panelMode || 'cpa';
   inputSub2ApiUrl.value = state?.sub2apiUrl || '';
@@ -1113,12 +1247,15 @@ function applySettingsState(state) {
   inputSub2ApiGroup.value = state?.sub2apiGroupName || '';
   selectMailProvider.value = state?.mailProvider || '163';
   selectEmailGenerator.value = state?.emailGenerator || 'duck';
+  setCustomEmailAliasMode(state?.customEmailAliasMode);
   inputEmailPrefix.value = state?.emailPrefix || '';
+  inputEmailSuffix.value = normalizeCustomEmailSuffixValue(state?.emailSuffix || '');
   inputInbucketHost.value = state?.inbucketHost || '';
   inputInbucketMailbox.value = state?.inbucketMailbox || '';
   setHotmailServiceMode(state?.hotmailServiceMode);
   inputHotmailRemoteBaseUrl.value = state?.hotmailRemoteBaseUrl || '';
   inputHotmailLocalBaseUrl.value = state?.hotmailLocalBaseUrl || '';
+  updateStepsLayout(state);
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
   setCloudflareDomainEditMode(false, { clearInput: true });
   inputAutoSkipFailures.checked = true;
@@ -1394,6 +1531,14 @@ function getSelectedEmailGenerator() {
 
 function getEmailGeneratorUiCopy() {
   if (getSelectedEmailGenerator() === 'custom') {
+    if (isCustomEmailAliasModeSelected()) {
+      return {
+        buttonLabel: '生成',
+        placeholder: '点击生成本轮注册邮箱（固定前缀 + 随机串 + 完整后缀）',
+        successVerb: '生成',
+        label: '自定义邮箱',
+      };
+    }
     return {
       buttonLabel: '自定义邮箱',
       placeholder: '请填写本轮要使用的注册邮箱',
@@ -1421,6 +1566,14 @@ function getEmailGeneratorUiCopy() {
 
 function isCustomEmailGeneratorSelected() {
   return getSelectedEmailGenerator() === 'custom';
+}
+
+function isCustomEmailAliasModeSelected() {
+  return isCustomEmailGeneratorSelected() && getSelectedCustomEmailAliasMode();
+}
+
+function isCustomEmailFullModeSelected() {
+  return isCustomEmailGeneratorSelected() && !getSelectedCustomEmailAliasMode();
 }
 
 function getHotmailAccounts(state = latestState) {
@@ -1687,18 +1840,22 @@ function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
   const useHotmail = selectMailProvider.value === 'hotmail-api';
   const useCustomEmail = !useGeneratedAlias && !useHotmail && isCustomEmailGeneratorSelected();
+  const useCustomAlias = useCustomEmail && getSelectedCustomEmailAliasMode();
+  const useCustomEmailFull = useCustomEmail && !useCustomAlias;
   const useEmailGenerator = !useHotmail && !useGeneratedAlias;
   updateMailLoginButtonState();
-  rowEmailPrefix.style.display = useGeneratedAlias ? '' : 'none';
+  setDataRowVisible(rowEmailPrefix, useGeneratedAlias || useCustomAlias);
   const hotmailServiceMode = getSelectedHotmailServiceMode();
-  rowInbucketHost.style.display = useInbucket ? '' : 'none';
-  rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
+  setDataRowVisible(rowInbucketHost, useInbucket);
+  setDataRowVisible(rowInbucketMailbox, useInbucket);
   const useCloudflare = selectEmailGenerator.value === 'cloudflare';
   const showCloudflareDomain = useEmailGenerator && useCloudflare;
   if (rowEmailGenerator) {
-    rowEmailGenerator.style.display = useEmailGenerator ? '' : 'none';
+    setDataRowVisible(rowEmailGenerator, useEmailGenerator);
   }
-  rowCfDomain.style.display = showCloudflareDomain ? '' : 'none';
+  setDataRowVisible(rowCustomEmailAliasMode, useCustomEmail);
+  setDataRowVisible(rowEmailSuffix, useCustomAlias);
+  setDataRowVisible(rowCfDomain, showCloudflareDomain);
   const { domains } = getCloudflareDomainsFromState();
   if (showCloudflareDomain) {
     setCloudflareDomainEditMode(cloudflareDomainEditMode || domains.length === 0, { clearInput: false });
@@ -1709,25 +1866,31 @@ function updateMailProviderUI() {
   if (hotmailSection) {
     hotmailSection.style.display = useHotmail ? '' : 'none';
   }
-  labelEmailPrefix.textContent = '邮箱前缀';
-  inputEmailPrefix.placeholder = '例如 abc';
+  labelEmailPrefix.textContent = useCustomAlias ? '固定前缀' : '邮箱前缀';
+  inputEmailPrefix.placeholder = useCustomAlias ? '例如 aleeas2026+' : '例如 abc';
+  if (labelEmailSuffix) {
+    labelEmailSuffix.textContent = useCustomAlias ? '完整后缀' : '邮箱后缀';
+  }
+  if (inputEmailSuffix) {
+    inputEmailSuffix.placeholder = useCustomAlias ? '例如 @aleeas.com' : '例如 @gmail.com';
+  }
   selectEmailGenerator.disabled = useHotmail || useGeneratedAlias;
   if (rowHotmailServiceMode) {
-    rowHotmailServiceMode.style.display = useHotmail ? '' : 'none';
+    setDataRowVisible(rowHotmailServiceMode, useHotmail);
   }
   if (rowHotmailRemoteBaseUrl) {
-    rowHotmailRemoteBaseUrl.style.display = useHotmail && hotmailServiceMode === HOTMAIL_SERVICE_MODE_REMOTE ? '' : 'none';
+    setDataRowVisible(rowHotmailRemoteBaseUrl, useHotmail && hotmailServiceMode === HOTMAIL_SERVICE_MODE_REMOTE);
   }
   if (rowHotmailLocalBaseUrl) {
-    rowHotmailLocalBaseUrl.style.display = useHotmail && hotmailServiceMode === HOTMAIL_SERVICE_MODE_LOCAL ? '' : 'none';
+    setDataRowVisible(rowHotmailLocalBaseUrl, useHotmail && hotmailServiceMode === HOTMAIL_SERVICE_MODE_LOCAL);
   }
-  btnFetchEmail.hidden = useHotmail || useCustomEmail;
-  inputEmail.readOnly = useHotmail || useGeneratedAlias;
+  btnFetchEmail.hidden = useHotmail || useCustomEmailFull;
+  inputEmail.readOnly = useHotmail || useGeneratedAlias || useCustomAlias;
   const uiCopy = getEmailGeneratorUiCopy();
   inputEmail.placeholder = useHotmail
     ? '由 Hotmail 账号池自动分配'
     : (use2925 ? '步骤 3 自动生成 2925 邮箱并回填' : uiCopy.placeholder);
-  btnFetchEmail.disabled = useGeneratedAlias || useCustomEmail || isAutoRunLockedPhase();
+  btnFetchEmail.disabled = useGeneratedAlias || useCustomEmailFull || isAutoRunLockedPhase();
   if (!btnFetchEmail.disabled) {
     btnFetchEmail.textContent = uiCopy.buttonLabel;
   }
@@ -1736,7 +1899,11 @@ function updateMailProviderUI() {
       ? '请先校验并选择一个 Hotmail 账号'
       : (useGeneratedAlias
         ? '步骤 3 会自动生成邮箱，无需手动获取'
-        : (useCustomEmail ? '请先填写自定义注册邮箱，成功一轮后会自动清空' : '先自动获取邮箱，或手动粘贴邮箱后再继续'));
+        : (useCustomAlias
+          ? '按前缀 + 随机串 + 后缀生成注册邮箱；Auto 每一轮都会重新生成随机串'
+          : (useCustomEmailFull
+            ? '请先填写自定义注册邮箱，成功一轮后会自动清空'
+            : '先自动获取邮箱，或手动粘贴邮箱后再继续')));
   }
   if (useHotmail) {
     inputEmail.value = getCurrentHotmailEmail();
@@ -1786,6 +1953,18 @@ function updatePanelModeUI() {
   rowSub2ApiPassword.style.display = useSub2Api ? '' : 'none';
   rowSub2ApiGroup.style.display = useSub2Api ? '' : 'none';
 
+  updateStepsLayout();
+}
+
+function updateStepsLayout(state = latestState) {
+  const visibleSteps = new Set(getCurrentStepOrder(state));
+  const useSub2Api = selectPanelMode.value === 'sub2api';
+
+  document.querySelectorAll('.step-row').forEach((row) => {
+    const stepId = normalizeStepId(row.dataset.step);
+    row.style.display = visibleSteps.has(stepId) ? '' : 'none';
+  });
+
   const step9Btn = document.querySelector('.step-btn[data-step="9"]');
   if (step9Btn) {
     step9Btn.textContent = useSub2Api ? 'SUB2API 回调验证' : 'CPA 回调验证';
@@ -1797,13 +1976,14 @@ function updatePanelModeUI() {
 // ============================================================
 
 function updateStepUI(step, status) {
-  const statusEl = document.querySelector(`.step-status[data-step="${step}"]`);
-  const row = document.querySelector(`.step-row[data-step="${step}"]`);
+  const stepId = normalizeStepId(step);
+  const statusEl = document.querySelector(`.step-status[data-step="${stepId}"]`);
+  const row = document.querySelector(`.step-row[data-step="${stepId}"]`);
 
   syncLatestState({
     stepStatuses: {
       ...getStepStatuses(),
-      [step]: status,
+      [stepId]: status,
     },
   });
 
@@ -1818,47 +1998,51 @@ function updateStepUI(step, status) {
 }
 
 function updateProgressCounter() {
-  const completed = Object.values(getStepStatuses()).filter(isDoneStatus).length;
-  stepsProgress.textContent = `${completed} / 9`;
+  const statuses = getStepStatuses();
+  const currentSteps = getCurrentStepOrder();
+  const completed = currentSteps.filter((step) => isDoneStatus(statuses[step])).length;
+  stepsProgress.textContent = `${completed} / ${currentSteps.length}`;
 }
 
 function updateButtonStates() {
   const statuses = getStepStatuses();
-  const anyRunning = Object.values(statuses).some(s => s === 'running');
+  const currentSteps = getCurrentStepOrder();
+  const anyRunning = currentSteps.some((step) => statuses[step] === 'running');
   const autoLocked = isAutoRunLockedPhase();
   const autoScheduled = isAutoRunScheduledPhase();
 
-  for (let step = 1; step <= 9; step++) {
+  currentSteps.forEach((step, index) => {
     const btn = document.querySelector(`.step-btn[data-step="${step}"]`);
-    if (!btn) continue;
+    if (!btn) return;
 
     if (anyRunning || autoLocked || autoScheduled) {
       btn.disabled = true;
-    } else if (step === 1) {
+    } else if (index === 0) {
       btn.disabled = false;
     } else {
-      const prevStatus = statuses[step - 1];
+      const prevStatus = statuses[currentSteps[index - 1]];
       const currentStatus = statuses[step];
       btn.disabled = !(isDoneStatus(prevStatus) || currentStatus === 'failed' || isDoneStatus(currentStatus) || currentStatus === 'stopped');
     }
-  }
+  });
 
   document.querySelectorAll('.step-manual-btn').forEach((btn) => {
-    const step = Number(btn.dataset.step);
+    const step = normalizeStepId(btn.dataset.step);
+    const stepIndex = currentSteps.indexOf(step);
     const currentStatus = statuses[step];
-    const prevStatus = statuses[step - 1];
+    const prevStatus = stepIndex > 0 ? statuses[currentSteps[stepIndex - 1]] : null;
 
-    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || autoScheduled || currentStatus === 'running' || isDoneStatus(currentStatus)) {
+    if (stepIndex === -1 || !SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || autoScheduled || currentStatus === 'running' || isDoneStatus(currentStatus)) {
       btn.style.display = 'none';
       btn.disabled = true;
       btn.title = '当前不可跳过';
       return;
     }
 
-    if (step > 1 && !isDoneStatus(prevStatus)) {
+    if (stepIndex > 0 && !isDoneStatus(prevStatus)) {
       btn.style.display = 'none';
       btn.disabled = true;
-      btn.title = `请先完成步骤 ${step - 1}`;
+      btn.title = `请先完成步骤 ${currentSteps[stepIndex - 1]}`;
       return;
     }
 
@@ -1879,6 +2063,9 @@ function updateStatusDisplay(state) {
   if (!state || !state.stepStatuses) return;
 
   statusBar.className = 'status-bar';
+  const statuses = getStepStatuses(state);
+  const currentSteps = getCurrentStepOrder(state);
+  const lastStepId = getLastStepId(state);
 
   if (isAutoRunScheduledPhase()) {
     const remainingMs = Number.isFinite(currentAutoRun.scheduledAt)
@@ -1906,9 +2093,9 @@ function updateStatusDisplay(state) {
     return;
   }
 
-  const running = Object.entries(state.stepStatuses).find(([, s]) => s === 'running');
+  const running = currentSteps.find((step) => statuses[step] === 'running');
   if (running) {
-    displayStatus.textContent = `步骤 ${running[0]} 运行中...`;
+    displayStatus.textContent = `步骤 ${running} 运行中...`;
     statusBar.classList.add('running');
     return;
   }
@@ -1919,30 +2106,27 @@ function updateStatusDisplay(state) {
     return;
   }
 
-  const failed = Object.entries(state.stepStatuses).find(([, s]) => s === 'failed');
+  const failed = currentSteps.find((step) => statuses[step] === 'failed');
   if (failed) {
-    displayStatus.textContent = `步骤 ${failed[0]} 失败`;
+    displayStatus.textContent = `步骤 ${failed} 失败`;
     statusBar.classList.add('failed');
     return;
   }
 
-  const stopped = Object.entries(state.stepStatuses).find(([, s]) => s === 'stopped');
+  const stopped = currentSteps.find((step) => statuses[step] === 'stopped');
   if (stopped) {
-    displayStatus.textContent = `步骤 ${stopped[0]} 已停止`;
+    displayStatus.textContent = `步骤 ${stopped} 已停止`;
     statusBar.classList.add('stopped');
     return;
   }
 
-  const lastCompleted = Object.entries(state.stepStatuses)
-    .filter(([, s]) => isDoneStatus(s))
-    .map(([k]) => Number(k))
-    .sort((a, b) => b - a)[0];
+  const lastCompleted = [...currentSteps].reverse().find((step) => isDoneStatus(statuses[step])) || null;
 
-  if (lastCompleted === 9) {
-    displayStatus.textContent = (state.stepStatuses[9] === 'manual_completed' || state.stepStatuses[9] === 'skipped') ? '全部步骤已跳过/完成' : '全部步骤已完成';
+  if (lastCompleted && lastCompleted === lastStepId) {
+    displayStatus.textContent = (statuses[lastCompleted] === 'manual_completed' || statuses[lastCompleted] === 'skipped') ? '全部步骤已跳过/完成' : '全部步骤已完成';
     statusBar.classList.add('completed');
   } else if (lastCompleted) {
-    displayStatus.textContent = (state.stepStatuses[lastCompleted] === 'manual_completed' || state.stepStatuses[lastCompleted] === 'skipped')
+    displayStatus.textContent = (statuses[lastCompleted] === 'manual_completed' || statuses[lastCompleted] === 'skipped')
       ? `步骤 ${lastCompleted} 已跳过`
       : `步骤 ${lastCompleted} 已完成`;
   } else {
@@ -1956,8 +2140,8 @@ function appendLog(entry) {
   const line = document.createElement('div');
   line.className = `log-line log-${entry.level}`;
 
-  const stepMatch = entry.message.match(/(?:Step\s+(\d+)|步骤\s*(\d+))/);
-  const stepNum = stepMatch ? (stepMatch[1] || stepMatch[2]) : null;
+  const stepMatch = entry.message.match(/(?:Step\s+((?:A\d+)|\d+)|步骤\s*((?:A\d+)|\d+))/i);
+  const stepNum = stepMatch ? (stepMatch[1] || stepMatch[3] || stepMatch[2] || stepMatch[4]) : null;
 
   let html = `<span class="log-time">${time}</span> `;
   html += `<span class="log-level log-level-${entry.level}">${levelLabel}</span> `;
@@ -1980,7 +2164,7 @@ function escapeHtml(text) {
 async function fetchGeneratedEmail(options = {}) {
   const { showFailureToast = true } = options;
   const uiCopy = getEmailGeneratorUiCopy();
-  if (isCustomEmailGeneratorSelected()) {
+  if (isCustomEmailFullModeSelected()) {
     throw new Error('当前邮箱生成方式为自定义邮箱，请直接填写注册邮箱。');
   }
   const defaultLabel = uiCopy.buttonLabel;
@@ -1988,6 +2172,9 @@ async function fetchGeneratedEmail(options = {}) {
   btnFetchEmail.textContent = '...';
 
   try {
+    if (settingsDirty) {
+      await saveSettings({ silent: true });
+    }
     const response = await chrome.runtime.sendMessage({
       type: 'FETCH_GENERATED_EMAIL',
       source: 'sidepanel',
@@ -2250,11 +2437,11 @@ async function handleSkipStep(step) {
 document.querySelectorAll('.step-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     try {
-      const step = Number(btn.dataset.step);
+      const step = normalizeStepId(btn.dataset.step);
       if (!(await maybeTakeoverAutoRun(`执行步骤 ${step}`))) {
         return;
       }
-      if (step === 3) {
+      if (step === '3' || step === 'A2') {
         if (inputPassword.value !== (latestState?.customPassword || '')) {
           await chrome.runtime.sendMessage({
             type: 'SAVE_SETTING',
@@ -2282,8 +2469,8 @@ document.querySelectorAll('.step-btn').forEach(btn => {
         } else {
           let email = inputEmail.value.trim();
           if (!email) {
-            if (isCustomEmailGeneratorSelected()) {
-              showToast('当前邮箱生成方式为自定义邮箱，请先填写注册邮箱后再执行第 3 步。', 'warn');
+            if (isCustomEmailFullModeSelected()) {
+              showToast(`当前邮箱生成方式为自定义邮箱，请先填写注册邮箱后再执行步骤 ${step}。`, 'warn');
               return;
             }
             try {
@@ -2293,10 +2480,29 @@ document.querySelectorAll('.step-btn').forEach(btn => {
               return;
             }
           }
-          const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
+          const payload = { step, email };
+          if (isCustomEmailAliasModeSelected()) {
+            payload.emailPrefix = inputEmailPrefix.value.trim();
+            payload.emailSuffix = normalizeCustomEmailSuffixValue(inputEmailSuffix.value);
+            payload.customEmailAliasMode = true;
+          }
+          const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload });
           if (response?.error) {
             throw new Error(response.error);
           }
+        }
+      } else if (step === 'A3') {
+        if (inputPassword.value !== (latestState?.customPassword || '')) {
+          await chrome.runtime.sendMessage({
+            type: 'SAVE_SETTING',
+            source: 'sidepanel',
+            payload: { customPassword: inputPassword.value },
+          });
+          syncLatestState({ customPassword: inputPassword.value });
+        }
+        const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
+        if (response?.error) {
+          throw new Error(response.error);
         }
       } else {
         const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
@@ -2311,7 +2517,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  if (selectMailProvider.value === 'hotmail-api' || isCustomEmailGeneratorSelected()) {
+  if (selectMailProvider.value === 'hotmail-api' || isCustomEmailFullModeSelected()) {
     return;
   }
   await fetchGeneratedEmail().catch(() => { });
@@ -2576,6 +2782,23 @@ btnMailLogin?.addEventListener('click', async () => {
   }
 });
 
+registrationModeButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const nextMode = button.dataset.registrationMode;
+    if (getSelectedRegistrationMode() === normalizeRegistrationMode(nextMode)) {
+      return;
+    }
+    setRegistrationMode(nextMode);
+    syncLatestState({ registrationMode: normalizeRegistrationMode(nextMode) });
+    updateStepsLayout();
+    updateProgressCounter();
+    updateButtonStates();
+    updateStatusDisplay(latestState);
+    markSettingsDirty(true);
+    saveSettings({ silent: true }).catch(() => { });
+  });
+});
+
 localCpaStep9ModeButtons.forEach((button) => {
   button.addEventListener('click', () => {
     const nextMode = button.dataset.localCpaStep9Mode;
@@ -2602,6 +2825,34 @@ hotmailServiceModeButtons.forEach((button) => {
     markSettingsDirty(true);
     saveSettings({ silent: true }).catch(() => { });
   });
+});
+
+customEmailAliasModeButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    handleCustomEmailAliasModeChange(button.dataset.customEmailAliasMode);
+  });
+});
+
+customEmailAliasModeGroup?.addEventListener('click', (event) => {
+  const eventTarget = event.target instanceof Element ? event.target : null;
+  const targetButton = eventTarget?.closest('[data-custom-email-alias-mode]');
+  if (!targetButton) {
+    return;
+  }
+  handleCustomEmailAliasModeChange(targetButton.dataset.customEmailAliasMode);
+});
+
+customEmailAliasModeGroup?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') {
+    return;
+  }
+  const eventTarget = event.target instanceof Element ? event.target : null;
+  const targetButton = eventTarget?.closest('[data-custom-email-alias-mode]');
+  if (!targetButton) {
+    return;
+  }
+  event.preventDefault();
+  handleCustomEmailAliasModeChange(targetButton.dataset.customEmailAliasMode);
 });
 
 btnSaveSettings.addEventListener('click', async () => {
@@ -2675,12 +2926,41 @@ btnAutoRun.addEventListener('click', async () => {
 
     btnAutoRun.disabled = true;
     inputRunCount.disabled = true;
+    const prefilledEmailBeforeSave = isCustomEmailFullModeSelected()
+      ? String(inputEmail.value || '').trim()
+      : '';
+    if (settingsDirty) {
+      await saveSettings({ silent: true });
+    }
     const delayEnabled = inputAutoDelayEnabled.checked;
     const delayMinutes = normalizeAutoDelayMinutes(inputAutoDelayMinutes.value);
     inputAutoDelayMinutes.value = String(delayMinutes);
     btnAutoRun.innerHTML = delayEnabled
       ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 计划中...'
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
+    if (isCustomEmailAliasModeSelected()) {
+      // 别名生成模式每一轮都要重新生成随机串，启动 Auto 前先清空当前邮箱缓存。
+      await clearRegistrationEmail({ silent: true });
+    } else if (isCustomEmailFullModeSelected()) {
+      // 完整邮箱模式下，如果注册邮箱栏已有邮箱，先同步到后台状态，
+      // 使 ensureAutoEmailReady 检测到 email 有值而不暂停等待。
+      const prefilledEmail = prefilledEmailBeforeSave || String(inputEmail.value || '').trim();
+      if (prefilledEmail) {
+        try {
+          inputEmail.value = prefilledEmail;
+          syncLatestState({ email: prefilledEmail });
+          const syncResp = await chrome.runtime.sendMessage({ type: 'SAVE_EMAIL', source: 'sidepanel', payload: { email: prefilledEmail } });
+          if (syncResp?.error) {
+            throw new Error(syncResp.error);
+          }
+        } catch (syncErr) {
+          showToast(`同步邮箱失败：${syncErr.message}`, 'error');
+          setDefaultAutoRunButton();
+          inputRunCount.disabled = false;
+          return;
+        }
+      }
+    }
     const response = await chrome.runtime.sendMessage({
       type: delayEnabled ? 'SCHEDULE_AUTO_RUN' : 'AUTO_RUN',
       source: 'sidepanel',
@@ -2705,7 +2985,7 @@ btnAutoContinue.addEventListener('click', async () => {
   const email = inputEmail.value.trim();
   if (!email) {
     showToast(
-      isCustomEmailGeneratorSelected() ? '请先填写自定义注册邮箱。' : '请先获取或粘贴邮箱。',
+      isCustomEmailFullModeSelected() ? '请先填写自定义注册邮箱。' : '请先获取或粘贴邮箱。',
       'warn'
     );
     return;
@@ -2945,6 +3225,15 @@ inputEmailPrefix.addEventListener('blur', () => {
   saveSettings({ silent: true }).catch(() => {});
 });
 
+inputEmailSuffix.addEventListener('input', () => {
+  markSettingsDirty(true);
+  scheduleSettingsAutoSave();
+});
+inputEmailSuffix.addEventListener('blur', () => {
+  inputEmailSuffix.value = normalizeCustomEmailSuffixValue(inputEmailSuffix.value);
+  saveSettings({ silent: true }).catch(() => {});
+});
+
 inputInbucketMailbox.addEventListener('input', () => {
   markSettingsDirty(true);
   scheduleSettingsAutoSave();
@@ -3064,10 +3353,13 @@ chrome.runtime.onMessage.addListener((message) => {
 
     case 'AUTO_RUN_RESET': {
       // Full UI reset for next run
+      const preservedEmail = isCustomEmailFullModeSelected()
+        ? String(latestState?.email || inputEmail.value || '').trim()
+        : '';
       syncLatestState({
         oauthUrl: null,
         localhostUrl: null,
-        email: null,
+        email: preservedEmail || null,
         password: null,
         stepStatuses: STEP_DEFAULT_STATUSES,
         logs: [],
@@ -3077,7 +3369,7 @@ chrome.runtime.onMessage.addListener((message) => {
       displayOauthUrl.classList.remove('has-value');
       displayLocalhostUrl.textContent = '等待中...';
       displayLocalhostUrl.classList.remove('has-value');
-      inputEmail.value = '';
+      inputEmail.value = preservedEmail;
       displayStatus.textContent = '就绪';
       statusBar.className = 'status-bar';
       logArea.innerHTML = '';
@@ -3206,6 +3498,7 @@ initHotmailListExpandedState();
 updateSaveButtonState();
 updateConfigMenuControls();
 setLocalCpaStep9Mode(DEFAULT_LOCAL_CPA_STEP9_MODE);
+setCustomEmailAliasMode(false);
 initializeReleaseInfo().catch((err) => {
   console.error('Failed to initialize release info:', err);
 });

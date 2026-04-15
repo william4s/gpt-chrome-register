@@ -1,12 +1,13 @@
 const assert = require('assert');
 const fs = require('fs');
 
-const source = fs.readFileSync('background.js', 'utf8');
+const backgroundSource = fs.readFileSync('background.js', 'utf8');
+const signupPageSource = fs.readFileSync('content/signup-page.js', 'utf8');
 
-function extractFunction(name) {
+function extractFunctionFromSource(sourceText, name) {
   const markers = [`async function ${name}(`, `function ${name}(`];
   const start = markers
-    .map(marker => source.indexOf(marker))
+    .map(marker => sourceText.indexOf(marker))
     .find(index => index >= 0);
   if (start < 0) {
     throw new Error(`missing function ${name}`);
@@ -15,8 +16,8 @@ function extractFunction(name) {
   let parenDepth = 0;
   let signatureEnded = false;
   let braceStart = -1;
-  for (let i = start; i < source.length; i += 1) {
-    const ch = source[i];
+  for (let i = start; i < sourceText.length; i += 1) {
+    const ch = sourceText[i];
     if (ch === '(') {
       parenDepth += 1;
     } else if (ch === ')') {
@@ -35,8 +36,8 @@ function extractFunction(name) {
 
   let depth = 0;
   let end = braceStart;
-  for (; end < source.length; end += 1) {
-    const ch = source[end];
+  for (; end < sourceText.length; end += 1) {
+    const ch = sourceText[end];
     if (ch === '{') depth += 1;
     if (ch === '}') {
       depth -= 1;
@@ -47,7 +48,15 @@ function extractFunction(name) {
     }
   }
 
-  return source.slice(start, end);
+  return sourceText.slice(start, end);
+}
+
+function extractFunction(name) {
+  return extractFunctionFromSource(backgroundSource, name);
+}
+
+function extractSignupPageFunction(name) {
+  return extractFunctionFromSource(signupPageSource, name);
 }
 
 async function testPollFreshVerificationCodeRethrowsStop() {
@@ -89,6 +98,10 @@ async function requestVerificationCodeResend() {
 async function addLog(message, level) {
   logs.push({ message, level });
 }
+async function getTabId() {
+  return null;
+}
+const chrome = { tabs: { update: async () => {} } };
 
 ${bundle}
 
@@ -134,6 +147,9 @@ function getHotmailVerificationPollConfig() {
 function getVerificationCodeLabel(step) {
   return step === 4 ? '注册' : '登录';
 }
+function isRestartCurrentAttemptError() {
+  return false;
+}
 function isStep7RestartFromStep6Error() {
   return false;
 }
@@ -176,9 +192,79 @@ return {
   assert.deepStrictEqual(state.logs, [], 'Stop 后不应追加降级日志');
 }
 
+async function testWaitForVerificationSubmitOutcomeReturnsRestartCurrentAttempt() {
+  const bundle = [
+    extractSignupPageFunction('normalizeFlowStep'),
+    extractSignupPageFunction('isSignupVerificationFlowStep'),
+    extractSignupPageFunction('isLoginVerificationFlowStep'),
+    extractSignupPageFunction('waitForVerificationSubmitOutcome'),
+  ].join('\n');
+
+  const api = new Function(`
+let currentTime = 0;
+let sleepCalls = 0;
+const Date = {
+  now() {
+    return currentTime;
+  },
+};
+
+function throwIfStopped() {}
+function getVerificationErrorText() {
+  return '';
+}
+function getStep7RestartCurrentAttemptSignal() {
+  if (currentTime < 300) {
+    return null;
+  }
+  return {
+    restartCurrentAttempt: true,
+    error: 'STEP7_RESTART_CURRENT_ATTEMPT::max_check_attempts_error_page::https://auth.openai.com/log-in',
+  };
+}
+function getStep7RestartFromStep6Signal() {
+  return null;
+}
+function isStep5Ready() {
+  return false;
+}
+function isStep8Ready() {
+  return false;
+}
+function isAddPhonePageReady() {
+  return false;
+}
+function isVerificationPageStillVisible() {
+  return false;
+}
+async function sleep(ms) {
+  sleepCalls += 1;
+  currentTime += ms;
+}
+
+${bundle}
+
+return {
+  waitForVerificationSubmitOutcome,
+  snapshot() {
+    return { currentTime, sleepCalls };
+  },
+};
+`)();
+
+  const outcome = await api.waitForVerificationSubmitOutcome(7, 300);
+  const state = api.snapshot();
+
+  assert.strictEqual(outcome.restartCurrentAttempt, true, '步骤 7 命中 max_check_attempts 错误页时应返回整轮重开信号');
+  assert.match(outcome.error, /max_check_attempts/, '返回结果应保留 max_check_attempts marker');
+  assert.strictEqual(state.currentTime, 300, '应在超时边界复查错误页，而不是直接按成功推定');
+  assert.strictEqual(state.sleepCalls, 2, '应等待到超时边界后再做最终复查');
+}
+
 (async () => {
   await testPollFreshVerificationCodeRethrowsStop();
   await testResolveVerificationStepRethrowsStopFromFreshRequest();
+  await testWaitForVerificationSubmitOutcomeReturnsRestartCurrentAttempt();
   console.log('verification stop propagation tests passed');
 })().catch((error) => {
   console.error(error);

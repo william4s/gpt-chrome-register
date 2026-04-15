@@ -10,7 +10,7 @@ const SCRIPT_SOURCE = (() => {
   if (hostname === 'mail.qq.com' || hostname === 'wx.mail.qq.com') return 'qq-mail';
   if (hostname === 'mail.163.com' || hostname.endsWith('.mail.163.com') || hostname === 'webmail.vip.163.com') return 'mail-163';
   if (url.includes('duckduckgo.com/email/settings/autofill')) return 'duck-mail';
-  if (url.includes('chatgpt.com')) return 'chatgpt';
+  if (url.includes('chatgpt.com')) return 'signup-page';
   if (url.includes("2925.com")) return "mail-2925";
   // VPS panel — detected dynamically since URL is configurable
   return 'vps-panel';
@@ -347,6 +347,39 @@ function simulateClick(el) {
     throw new Error('无法点击空元素。');
   }
 
+  if (typeof el.focus === 'function') {
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      try {
+        el.focus();
+      } catch { }
+    }
+  }
+
+  const rect = typeof el.getBoundingClientRect === 'function'
+    ? el.getBoundingClientRect()
+    : { left: 0, top: 0, width: 0, height: 0 };
+  const pointerPayload = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    button: 0,
+    buttons: 1,
+  };
+  const PointerEventCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+
+  const dispatchSyntheticPointerEvent = (eventName, EventCtor = MouseEvent, overrides = {}) => {
+    try {
+      el.dispatchEvent(new EventCtor(eventName, { ...pointerPayload, ...overrides }));
+    } catch { }
+  };
+
+  dispatchSyntheticPointerEvent('pointerdown', PointerEventCtor);
+  dispatchSyntheticPointerEvent('mousedown');
+
   const form = el.form || el.closest?.('form') || null;
   const strategy = typeof getActivationStrategy === 'function'
     ? getActivationStrategy({
@@ -368,6 +401,9 @@ function simulateClick(el) {
     method = 'dispatchEvent';
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
+
+  dispatchSyntheticPointerEvent('mouseup', MouseEvent, { buttons: 0 });
+  dispatchSyntheticPointerEvent('pointerup', PointerEventCtor, { buttons: 0 });
 
   console.log(LOG_PREFIX, `已点击(${method}): ${el.tagName} ${el.textContent?.slice(0, 30) || ''}`);
   log(`已点击(${method}) [${el.tagName}] "${el.textContent?.trim().slice(0, 30) || ''}"`);

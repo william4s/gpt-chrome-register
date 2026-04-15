@@ -51,6 +51,7 @@ function extractFunction(name) {
 }
 
 const bundle = [
+  extractFunction('normalizeStepId'),
   extractFunction('getTabRegistry'),
   extractFunction('parseUrlSafely'),
   extractFunction('isLocalhostOAuthCallbackUrl'),
@@ -101,6 +102,9 @@ function broadcastDataUpdate() {}
 async function addLog(message) {
   logMessages.push(message);
 }
+
+function shouldUseCustomRegistrationEmail() { return false; }
+async function setEmailStateSilently() {}
 
 ${bundle}
 
@@ -163,8 +167,8 @@ return {
   let snapshot = api.snapshot();
   assert.deepStrictEqual(
     snapshot.removedBatches,
-    [[1], [2]],
-    'handleStepData(9) 应先关闭当前 callback 页，再按同源首段路径清理残留页'
+    [[1], [2, 3]],
+    'handleStepData(9) 应先关闭当前 callback 页，再按同源首段路径清理该路径族的残留页'
   );
   assert.strictEqual(
     snapshot.currentState.tabRegistry['signup-page'],

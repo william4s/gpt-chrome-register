@@ -123,4 +123,124 @@ assert.strictEqual(
   'empty legacy settings should migrate to no delay'
 );
 
-console.log('auto step delay tests passed');
+const customEmailBundle = [
+  extractFunction('normalizeEmailGenerator'),
+  extractFunction('normalizeCustomEmailSuffix'),
+  extractFunction('isGeneratedAliasProvider'),
+  extractFunction('isCustomAliasMode'),
+  extractFunction('shouldUseCustomRegistrationEmail'),
+  extractFunction('generateRandomSuffix'),
+  extractFunction('doesCustomAliasEmailMatchTemplate'),
+  extractFunction('buildGeneratedAliasEmail'),
+].join('\n');
+
+const customEmailApi = new Function(`
+let randomValue = 0;
+const nativeMath = globalThis.Math;
+const Math = {
+  floor(value) {
+    return nativeMath.floor(value);
+  },
+  random() {
+    return randomValue;
+  },
+};
+
+function isHotmailProvider(state = {}) {
+  return String(state?.mailProvider || '').trim().toLowerCase() === 'hotmail-api';
+}
+
+${customEmailBundle}
+
+return {
+  setRandom(value) {
+    randomValue = value;
+  },
+  normalizeCustomEmailSuffix,
+  shouldUseCustomRegistrationEmail,
+  doesCustomAliasEmailMatchTemplate,
+  buildGeneratedAliasEmail,
+};
+`)();
+
+assert.strictEqual(
+  customEmailApi.normalizeCustomEmailSuffix('aleeas.com'),
+  '@aleeas.com',
+  '自定义邮箱后缀应自动补齐 @ 前缀'
+);
+
+assert.strictEqual(
+  customEmailApi.normalizeCustomEmailSuffix('@Aleeas.com'),
+  '@aleeas.com',
+  '自定义邮箱后缀应归一化，避免大小写和多余 @ 干扰模板匹配'
+);
+
+assert.strictEqual(
+  customEmailApi.shouldUseCustomRegistrationEmail({
+    mailProvider: 'qq',
+    emailGenerator: 'custom',
+    customEmailAliasMode: false,
+  }),
+  true,
+  '自定义完整邮箱模式下，Auto 仍应等待用户手填完整注册邮箱'
+);
+
+assert.strictEqual(
+  customEmailApi.shouldUseCustomRegistrationEmail({
+    mailProvider: 'qq',
+    emailGenerator: 'custom',
+    customEmailAliasMode: true,
+  }),
+  false,
+  '自定义别名模式下，Auto 不应再停在等待手填邮箱'
+);
+
+customEmailApi.setRandom(0);
+const customAliasEmail = customEmailApi.buildGeneratedAliasEmail({
+  mailProvider: 'qq',
+  emailGenerator: 'custom',
+  customEmailAliasMode: true,
+  emailPrefix: 'aleeas2026+',
+  emailSuffix: 'aleeas.com',
+});
+
+assert.strictEqual(
+  customAliasEmail,
+  'aleeas2026+aaa@aleeas.com',
+  '自定义别名模式应生成 prefix + random(3~10) + suffix 结构的邮箱'
+);
+
+assert.strictEqual(
+  customEmailApi.doesCustomAliasEmailMatchTemplate({
+    emailGenerator: 'custom',
+    customEmailAliasMode: true,
+    emailPrefix: 'aleeas2026+',
+    emailSuffix: '@aleeas.com',
+  }, customAliasEmail),
+  true,
+  '已生成的自定义别名邮箱应能被模板匹配函数识别'
+);
+
+assert.strictEqual(
+  customEmailApi.doesCustomAliasEmailMatchTemplate({
+    emailGenerator: 'custom',
+    customEmailAliasMode: true,
+    emailPrefix: 'aleeas2026+',
+    emailSuffix: '@aleeas.com',
+  }, 'aleeas2026+aa@aleeas.com'),
+  false,
+  '随机段不足 3 位时不应被视为有效别名邮箱'
+);
+
+const mail2925Email = customEmailApi.buildGeneratedAliasEmail({
+  mailProvider: '2925',
+  emailPrefix: 'demo',
+});
+
+assert.strictEqual(
+  mail2925Email,
+  'demoaaaaaa@2925.com',
+  '旧的 2925 别名生成逻辑应保持不变'
+);
+
+console.log('auto step delay and custom email helper tests passed');
