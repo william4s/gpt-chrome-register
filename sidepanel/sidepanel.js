@@ -909,6 +909,12 @@ function getCurrentStepOrder(state = latestState) {
     : OAUTH_STEP_ORDER;
 }
 
+function getDisplayedStepNumberMap(state = latestState) {
+  return Object.fromEntries(
+    getCurrentStepOrder(state).map((stepId, index) => [normalizeStepId(stepId), String(index + 1)])
+  );
+}
+
 function getLastStepId(state = latestState) {
   const steps = getCurrentStepOrder(state);
   return steps[steps.length - 1] || null;
@@ -1957,12 +1963,21 @@ function updatePanelModeUI() {
 }
 
 function updateStepsLayout(state = latestState) {
-  const visibleSteps = new Set(getCurrentStepOrder(state));
+  const currentSteps = getCurrentStepOrder(state);
+  const visibleSteps = new Set(currentSteps);
+  const displayedStepNumberMap = getDisplayedStepNumberMap(state);
   const useSub2Api = selectPanelMode.value === 'sub2api';
 
   document.querySelectorAll('.step-row').forEach((row) => {
     const stepId = normalizeStepId(row.dataset.step);
     row.style.display = visibleSteps.has(stepId) ? '' : 'none';
+  });
+
+  document.querySelectorAll('.step-indicator').forEach((indicator) => {
+    const stepId = normalizeStepId(indicator.dataset.step);
+    const stepNum = indicator.querySelector('.step-num');
+    if (!stepNum) return;
+    stepNum.textContent = displayedStepNumberMap[stepId] || '';
   });
 
   const step9Btn = document.querySelector('.step-btn[data-step="9"]');

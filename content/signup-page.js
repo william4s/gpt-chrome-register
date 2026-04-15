@@ -248,6 +248,86 @@ async function waitForVisibleAuthPasswordInput(timeout = 15000) {
   return null;
 }
 
+function isSignupStatePastEmailStep(state) {
+  return state === 'password' || state === 'verification' || state === 'step5' || state === 'email_exists';
+}
+
+function isSignupStatePastPasswordStep(state) {
+  return state === 'verification' || state === 'step5' || state === 'email_exists';
+}
+
+async function waitForSignupEmailInputOrLaterState(timeout = 15000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const snapshot = inspectSignupVerificationState();
+    if (isSignupStatePastEmailStep(snapshot.state)) {
+      return snapshot;
+    }
+
+    const emailInput = getVisibleAuthEmailInput();
+    if (emailInput) {
+      return { state: 'email', emailInput };
+    }
+
+    await sleep(150);
+  }
+
+  const finalSnapshot = inspectSignupVerificationState();
+  if (isSignupStatePastEmailStep(finalSnapshot.state)) {
+    return finalSnapshot;
+  }
+
+  const emailInput = getVisibleAuthEmailInput();
+  if (emailInput) {
+    return { state: 'email', emailInput };
+  }
+
+  return finalSnapshot;
+}
+
+async function waitForSignupPasswordInputOrLaterState(timeout = 15000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const snapshot = inspectSignupVerificationState();
+    if (isSignupStatePastPasswordStep(snapshot.state)) {
+      return snapshot;
+    }
+
+    const passwordInput = snapshot.passwordInput || getVisibleAuthPasswordInput();
+    if (passwordInput) {
+      return {
+        state: 'password',
+        passwordInput,
+        submitButton: snapshot.submitButton || getSignupPasswordSubmitButton({ allowDisabled: true }),
+      };
+    }
+
+    await sleep(150);
+  }
+
+  const finalSnapshot = inspectSignupVerificationState();
+  if (isSignupStatePastPasswordStep(finalSnapshot.state)) {
+    return finalSnapshot;
+  }
+
+  const passwordInput = finalSnapshot.passwordInput || getVisibleAuthPasswordInput();
+  if (passwordInput) {
+    return {
+      state: 'password',
+      passwordInput,
+      submitButton: finalSnapshot.submitButton || getSignupPasswordSubmitButton({ allowDisabled: true }),
+    };
+  }
+
+  return finalSnapshot;
+}
+
 function getVerificationCodeTarget() {
   const codeInput = document.querySelector(VERIFICATION_CODE_INPUT_SELECTOR);
   if (codeInput && isVisibleElement(codeInput)) {
@@ -654,7 +734,7 @@ async function stepA2_fillSignupEmail(payload) {
   if (!email) throw new Error('未提供注册邮箱。');
 
   const currentSignupState = inspectSignupVerificationState();
-  if (['password', 'verification', 'step5', 'email_exists'].includes(currentSignupState.state)) {
+  if (isSignupStatePastEmailStep(currentSignupState.state)) {
     log('步骤 A2：页面已越过邮箱页，本步骤按已完成处理。', 'ok');
     reportComplete('A2', { email });
     return;
@@ -662,7 +742,14 @@ async function stepA2_fillSignupEmail(payload) {
 
   log(`步骤 A2：正在填写注册邮箱：${email}`);
 
-  const emailInput = await waitForElement(AUTH_EMAIL_INPUT_SELECTOR, 15000).catch(() => null);
+  const emailStage = await waitForSignupEmailInputOrLaterState(15000);
+  if (isSignupStatePastEmailStep(emailStage.state)) {
+    log('步骤 A2：等待期间页面已越过邮箱页，本步骤按已完成处理。', 'ok');
+    reportComplete('A2', { email });
+    return;
+  }
+
+  const emailInput = emailStage.emailInput || getVisibleAuthEmailInput();
   if (!emailInput) {
     throw new Error('在注册页未找到邮箱输入框。URL: ' + location.href);
   }
@@ -682,7 +769,7 @@ async function stepA2_fillSignupEmail(payload) {
   log('步骤 A2：邮箱已提交，正在等待密码页...');
 
   const postSubmitState = await waitForSignupEmailStepResult(10000);
-  if (['password', 'verification', 'step5', 'email_exists'].includes(postSubmitState.state)) {
+  if (isSignupStatePastEmailStep(postSubmitState.state)) {
     log('步骤 A2：提交后已进入下一阶段。', 'ok');
     reportComplete('A2', { email });
     return;
@@ -730,14 +817,21 @@ async function stepA3_fillSignupPassword(payload) {
   if (!password) throw new Error('步骤 A3 缺少可用密码。');
 
   const currentSignupState = inspectSignupVerificationState();
-  if (currentSignupState.state === 'verification' || currentSignupState.state === 'step5' || currentSignupState.state === 'email_exists') {
+  if (isSignupStatePastPasswordStep(currentSignupState.state)) {
     log('步骤 A3：页面已越过密码页，本步骤按已完成处理。', 'ok');
     reportComplete('A3', { signupVerificationRequestedAt: Date.now() });
     return;
   }
 
   log('步骤 A3：正在填写注册密码...');
-  const passwordInput = await waitForVisibleAuthPasswordInput(15000).catch(() => null);
+  const passwordStage = await waitForSignupPasswordInputOrLaterState(15000);
+  if (isSignupStatePastPasswordStep(passwordStage.state)) {
+    log('步骤 A3：等待期间页面已越过密码页，本步骤按已完成处理。', 'ok');
+    reportComplete('A3', { signupVerificationRequestedAt: Date.now() });
+    return;
+  }
+
+  const passwordInput = passwordStage.passwordInput || getVisibleAuthPasswordInput();
   if (!passwordInput) {
     throw new Error('提交邮箱后仍未找到密码输入框。URL: ' + location.href);
   }

@@ -261,10 +261,111 @@ return {
   assert.strictEqual(state.sleepCalls, 2, '应等待到超时边界后再做最终复查');
 }
 
+async function testWaitForSignupEmailInputOrLaterStateRecognizesAdvancedVerificationPage() {
+  const bundle = [
+    extractSignupPageFunction('isSignupStatePastEmailStep'),
+    extractSignupPageFunction('waitForSignupEmailInputOrLaterState'),
+  ].join('\n');
+
+  const api = new Function(`
+let currentTime = 0;
+let sleepCalls = 0;
+const Date = {
+  now() {
+    return currentTime;
+  },
+};
+
+function throwIfStopped() {}
+function getVisibleAuthEmailInput() {
+  return null;
+}
+function inspectSignupVerificationState() {
+  if (currentTime < 300) {
+    return { state: 'unknown' };
+  }
+  return { state: 'verification' };
+}
+async function sleep(ms) {
+  sleepCalls += 1;
+  currentTime += ms;
+}
+
+${bundle}
+
+return {
+  waitForSignupEmailInputOrLaterState,
+  snapshot() {
+    return { currentTime, sleepCalls };
+  },
+};
+`)();
+
+  const result = await api.waitForSignupEmailInputOrLaterState(600);
+  const state = api.snapshot();
+
+  assert.strictEqual(result.state, 'verification', 'A2 等待期间若页面已进入验证码页，应直接识别为已越过邮箱页');
+  assert.strictEqual(state.currentTime, 300, '应轮询到验证码页出现为止');
+  assert.strictEqual(state.sleepCalls, 2, '应在页面切换期内继续轮询，而不是直接失败');
+}
+
+async function testWaitForSignupPasswordInputOrLaterStateRecognizesAdvancedVerificationPage() {
+  const bundle = [
+    extractSignupPageFunction('isSignupStatePastPasswordStep'),
+    extractSignupPageFunction('waitForSignupPasswordInputOrLaterState'),
+  ].join('\n');
+
+  const api = new Function(`
+let currentTime = 0;
+let sleepCalls = 0;
+const Date = {
+  now() {
+    return currentTime;
+  },
+};
+
+function throwIfStopped() {}
+function getVisibleAuthPasswordInput() {
+  return null;
+}
+function getSignupPasswordSubmitButton() {
+  return null;
+}
+function inspectSignupVerificationState() {
+  if (currentTime < 300) {
+    return { state: 'unknown' };
+  }
+  return { state: 'verification' };
+}
+async function sleep(ms) {
+  sleepCalls += 1;
+  currentTime += ms;
+}
+
+${bundle}
+
+return {
+  waitForSignupPasswordInputOrLaterState,
+  snapshot() {
+    return { currentTime, sleepCalls };
+  },
+};
+`)();
+
+  const result = await api.waitForSignupPasswordInputOrLaterState(600);
+  const state = api.snapshot();
+
+  assert.strictEqual(result.state, 'verification', 'A3 等待期间若页面已进入验证码页，应直接识别为已越过密码页');
+  assert.strictEqual(state.currentTime, 300, '应轮询到验证码页出现为止');
+  assert.strictEqual(state.sleepCalls, 2, '应在页面切换期内继续轮询，而不是直接失败');
+}
+
 (async () => {
   await testPollFreshVerificationCodeRethrowsStop();
   await testResolveVerificationStepRethrowsStopFromFreshRequest();
   await testWaitForVerificationSubmitOutcomeReturnsRestartCurrentAttempt();
+  await testWaitForSignupEmailInputOrLaterStateRecognizesAdvancedVerificationPage();
+  await testWaitForSignupPasswordInputOrLaterStateRecognizesAdvancedVerificationPage();
   console.log('verification stop propagation tests passed');
 })().catch((error) => {
   console.error(error);

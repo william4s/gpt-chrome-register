@@ -28,7 +28,8 @@ const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
-const STEP7_RESTART_MAX_ROUNDS = 8;
+const FLOW_RETRY_BUDGET_MS = 60000;
+const STEP7_RESTART_MAX_ROUNDS = 3;
 const SUB2API_STEP1_RESPONSE_TIMEOUT_MS = 90000;
 const SUB2API_STEP9_RESPONSE_TIMEOUT_MS = 120000;
 const DEFAULT_SUB2API_URL = 'https://sub2api.hisence.fun/admin/accounts';
@@ -3268,11 +3269,11 @@ async function handleStepData(step, payload) {
 // Map of step -> { resolve, reject } for waiting on step completion
 const stepWaiters = new Map();
 let resumeWaiter = null;
-const AUTO_RUN_SIGNAL_COMPLETION_TIMEOUT_MS = 120000;
+const AUTO_RUN_SIGNAL_COMPLETION_TIMEOUT_MS = FLOW_RETRY_BUDGET_MS;
 const AUTO_RUN_BACKGROUND_COMPLETED_STEPS = new Set(['4', '7', '8', 'A4']);
 const STEP_COMPLETION_SIGNAL_STEPS = new Set(['1', '2', '3', '5', '6', '9', 'A1', 'A2', 'A3', 'A5']);
 
-function waitForStepComplete(step, timeoutMs = 120000) {
+function waitForStepComplete(step, timeoutMs = FLOW_RETRY_BUDGET_MS) {
   step = normalizeStepId(step);
   return new Promise((resolve, reject) => {
     throwIfStopped();
@@ -3694,7 +3695,7 @@ let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
 let autoRunAttemptRun = 0;
 const EMAIL_FETCH_MAX_ATTEMPTS = 5;
-const VERIFICATION_POLL_MAX_ROUNDS = 5;
+const VERIFICATION_POLL_MAX_ROUNDS = 3;
 const AUTO_STEP_DELAYS = {
   A1: 2500,
   A2: 2000,
@@ -4927,11 +4928,11 @@ async function executeSignupVerificationStep(state, stepId = '4', options = {}) 
       `步骤 ${stepId}：检测到步骤 3 提交后仍停留在密码页，正在内部重走步骤 1 和 2（${oauthRecoveryAttempt + 1}/${maxOauthRecoveryAttempts}）...`,
       'warn'
     );
-    const waitForFreshOAuth = waitForStepComplete('A1', 120000);
+    const waitForFreshOAuth = waitForStepComplete('A1', FLOW_RETRY_BUDGET_MS);
     await executeStepA1(await getState());
     await waitForFreshOAuth;
 
-    const waitForRegisterEntry = waitForStepComplete('A2', 120000);
+    const waitForRegisterEntry = waitForStepComplete('A2', FLOW_RETRY_BUDGET_MS);
     await executeStepA2(await getState());
     await waitForRegisterEntry;
 
@@ -5332,7 +5333,7 @@ async function executeStep5(state) {
 async function refreshOAuthUrlBeforeStep6(state) {
   await addLog(`步骤 6：正在刷新登录用的 ${getPanelModeLabel(state)} OAuth 链接...`);
   console.log(LOG_PREFIX, '[refreshOAuthUrlBeforeStep6] preparing fresh OAuth via step 1');
-  const waitForFreshOAuth = waitForStepComplete(1, 120000);
+  const waitForFreshOAuth = waitForStepComplete(1, FLOW_RETRY_BUDGET_MS);
   console.log(LOG_PREFIX, '[refreshOAuthUrlBeforeStep6] executing step 1 for fresh OAuth');
   await executeStep1(state);
   console.log(LOG_PREFIX, '[refreshOAuthUrlBeforeStep6] step 1 execute returned, waiting for completion signal');
@@ -5442,7 +5443,7 @@ async function runStep7Attempt(state) {
 
 async function rerunStep6ForStep7Recovery() {
   const currentState = await getState();
-  const waitForStep6 = waitForStepComplete(6, 120000);
+  const waitForStep6 = waitForStepComplete(6, FLOW_RETRY_BUDGET_MS);
   await addLog('步骤 7：正在回到步骤 6，重新发起登录验证码流程...', 'warn');
   await executeStep6(currentState);
   await waitForStep6;
@@ -5451,8 +5452,13 @@ async function rerunStep6ForStep7Recovery() {
 
 async function executeStep7(state) {
   let lastError = null;
+  const recoveryStartedAt = Date.now();
 
   for (let round = 1; round <= STEP7_RESTART_MAX_ROUNDS; round++) {
+    if (Date.now() - recoveryStartedAt >= FLOW_RETRY_BUDGET_MS) {
+      throw new Error(`步骤 7：恢复重试总时长已超过 ${FLOW_RETRY_BUDGET_MS / 1000} 秒，准备交给外层整轮重开。`);
+    }
+
     const currentState = round === 1 ? state : await getState();
 
     try {
@@ -5470,6 +5476,10 @@ async function executeStep7(state) {
 
       if (round >= STEP7_RESTART_MAX_ROUNDS) {
         break;
+      }
+
+      if (Date.now() - recoveryStartedAt >= FLOW_RETRY_BUDGET_MS) {
+        throw new Error(`步骤 7：恢复重试总时长已超过 ${FLOW_RETRY_BUDGET_MS / 1000} 秒，准备交给外层整轮重开。`);
       }
 
       await addLog(
@@ -5500,7 +5510,7 @@ let step8PendingReject = null;
 const STEP8_CLICK_EFFECT_TIMEOUT_MS = 15000;
 const STEP8_CLICK_RETRY_DELAY_MS = 500;
 const STEP8_READY_WAIT_TIMEOUT_MS = 30000;
-const STEP8_MAX_ROUNDS = 5;
+const STEP8_MAX_ROUNDS = 3;
 const STEP8_SIGNUP_PAGE_INJECT_FILES = ['content/utils.js', 'content/signup-page.js'];
 const STEP8_STRATEGIES = [
   { mode: 'content', strategy: 'requestSubmit', label: 'form.requestSubmit' },
@@ -5743,6 +5753,8 @@ async function executeStep8(state) {
     throw new Error('缺少 OAuth 链接，请先完成步骤 1。');
   }
 
+  const step8TimeoutMs = typeof FLOW_RETRY_BUDGET_MS === 'number' ? FLOW_RETRY_BUDGET_MS : 60000;
+
   await addLog('步骤 8：正在监听 localhost 回调地址...');
 
   return new Promise((resolve, reject) => {
@@ -5779,8 +5791,8 @@ async function executeStep8(state) {
     };
 
     const timeout = setTimeout(() => {
-      rejectStep8(new Error('120 秒内未捕获到 localhost 回调跳转，步骤 8 的点击可能被拦截了。'));
-    }, 120000);
+      rejectStep8(new Error(`${step8TimeoutMs / 1000} 秒内未捕获到 localhost 回调跳转，步骤 8 的点击可能被拦截了。`));
+    }, step8TimeoutMs);
 
     step8PendingReject = (error) => {
       rejectStep8(error);
