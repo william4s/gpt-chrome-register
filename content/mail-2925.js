@@ -3,6 +3,9 @@
 
 const MAIL2925_PREFIX = '[MultiPage:mail-2925]';
 const isTopFrame = window === window.top;
+const {
+  detect2925MainEmailFromPageSnapshot = () => null,
+} = globalThis.MultiPage2925Mail || {};
 
 console.log(MAIL2925_PREFIX, 'Content script loaded on', location.href, 'frame:', isTopFrame ? 'top' : 'child');
 
@@ -37,21 +40,27 @@ async function persistSeenMailKeys() {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'POLL_EMAIL') {
-    resetStopState();
-    handlePollEmail(message.step, message.payload).then(result => {
-      sendResponse(result);
-    }).catch(err => {
-      if (isStopError(err)) {
-        log(`步骤 ${message.step}：已被用户停止。`, 'warn');
-        sendResponse({ stopped: true, error: err.message });
-        return;
-      }
-      log(`步骤 ${message.step}：邮箱轮询失败：${err.message}`, 'warn');
-      sendResponse({ error: err.message });
-    });
-    return true;
+  if (message.type !== 'POLL_EMAIL' && message.type !== 'FETCH_2925_MAIN_EMAIL') {
+    return;
   }
+
+  resetStopState();
+  const handler = message.type === 'FETCH_2925_MAIN_EMAIL'
+    ? handleFetch2925MainEmail()
+    : handlePollEmail(message.step, message.payload || {});
+
+  handler.then((result) => {
+    sendResponse(result);
+  }).catch((err) => {
+    if (isStopError(err)) {
+      log(`步骤 ${message.step || '2925'}：已被用户停止。`, 'warn');
+      sendResponse({ stopped: true, error: err.message });
+      return;
+    }
+    log(`步骤 ${message.step || '2925'}：邮箱轮询失败：${err.message}`, 'warn');
+    sendResponse({ error: err.message });
+  });
+  return true;
 });
 
 const MAIL_ITEM_SELECTORS = [
@@ -130,13 +139,131 @@ function getCurrentMailIds(items = []) {
 }
 
 function buildSeenMailKey({ itemId, itemTimestamp, text, code }) {
-  if (itemId) {
-    return `id:${itemId}`;
-  }
+  const normalizedItemId = itemId ? String(itemId).trim() : '';
   const normalizedTimestamp = Number.isFinite(itemTimestamp) && itemTimestamp > 0 ? itemTimestamp : 0;
   const normalizedText = normalizeMailIdentityPart(text).slice(0, 240);
   const normalizedCode = (code || '').trim();
-  return `fallback:${normalizedTimestamp}:${normalizedText}:${normalizedCode}`;
+  return `mail:${normalizedItemId || 'no-id'}:${normalizedTimestamp}:${normalizedCode}:${normalizedText}`;
+}
+
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isVisible(el) {
+  if (!el) return false;
+  if (el.hidden) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    return false;
+  }
+  return Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+}
+
+function getElementText(el) {
+  return normalizeText(
+    el?.innerText
+    || el?.textContent
+    || el?.getAttribute?.('title')
+    || el?.getAttribute?.('aria-label')
+    || ''
+  );
+}
+
+async function waitForCondition(predicate, timeout, errorMessage) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeout) {
+    throwIfStopped();
+    const value = predicate();
+    if (value) {
+      return value;
+    }
+    await sleep(150);
+  }
+
+  throw new Error(errorMessage);
+}
+
+function getInboxTab() {
+  return Array.from(document.querySelectorAll('li, div, span, a, button'))
+    .filter(isVisible)
+    .find((el) => getElementText(el) === '收件箱');
+}
+
+function collectVisibleTextsFromSelectors(selectors = []) {
+  const seen = new Set();
+  const texts = [];
+
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      if (!isVisible(element)) {
+        continue;
+      }
+
+      const text = getElementText(element);
+      if (!text || seen.has(text)) {
+        continue;
+      }
+
+      seen.add(text);
+      texts.push(text);
+    }
+  }
+
+  return texts;
+}
+
+function collectPreferredMainEmailTexts() {
+  const selectors = [
+    'header',
+    'aside',
+    '.header',
+    '.top',
+    '.top-bar',
+    '.toolbar',
+    '.sidebar',
+    '.userinfo',
+    '.user-info',
+    '.account',
+    '.account-info',
+    '.mail-account',
+    '.mail-user',
+    '[class*="user"]',
+    '[class*="account"]',
+    '[class*="email"]',
+    '[class*="mail"]',
+    '[title*="@2925.com"]',
+    '[aria-label*="@2925.com"]',
+  ];
+
+  return collectVisibleTextsFromSelectors(selectors)
+    .filter((text) => text.includes('@2925.com') || /当前|账号|邮箱/.test(text));
+}
+
+function collectFallbackMainEmailTexts() {
+  const bodyText = normalizeText(document.body?.innerText || '');
+  return bodyText ? [bodyText] : [];
+}
+
+function buildMainEmailSnapshot() {
+  return {
+    fallbackTexts: collectFallbackMainEmailTexts(),
+    preferredTexts: collectPreferredMainEmailTexts(),
+  };
+}
+
+function has2925MailboxShell() {
+  if (!location.hash.startsWith('#/mailList')) {
+    return false;
+  }
+
+  return Boolean(
+    findMailItems().length > 0
+    || getInboxTab()
+    || document.querySelector('table')
+    || collectPreferredMainEmailTexts().length > 0
+  );
 }
 
 function normalizeMinuteTimestamp(timestamp) {
@@ -303,6 +430,66 @@ async function refreshInbox() {
   }
 }
 
+async function ensureMailListPage() {
+  if (!location.hash.startsWith('#/mailList')) {
+    location.hash = '#/mailList';
+    await sleep(700);
+  }
+
+  let items = findMailItems();
+  if (items.length > 0) {
+    return items;
+  }
+
+  const inboxTab = getInboxTab();
+  if (inboxTab) {
+    simulateClick(inboxTab);
+    await sleep(700);
+    items = findMailItems();
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  return waitForCondition(
+    () => {
+      const nextItems = findMailItems();
+      if (nextItems.length > 0) {
+        return nextItems;
+      }
+      return has2925MailboxShell() ? [] : null;
+    },
+    10000,
+    '未检测到 2925 主邮箱，请先登录 2925 邮箱并打开收件箱页面。'
+  );
+}
+
+async function handleFetch2925MainEmail() {
+  await ensureMailListPage();
+
+  let snapshot = buildMainEmailSnapshot();
+  let detected = detect2925MainEmailFromPageSnapshot(snapshot);
+
+  if (!detected?.email) {
+    log('2925 邮箱：首次识别主邮箱失败，准备刷新后重试...', 'warn');
+    await refreshInbox();
+    snapshot = buildMainEmailSnapshot();
+    detected = detect2925MainEmailFromPageSnapshot(snapshot);
+  }
+
+  if (!detected?.email) {
+    throw new Error('当前页面未识别到可用的 2925 主邮箱，请确认页面已完全加载后重试。');
+  }
+
+  return {
+    ok: true,
+    detectionMode: detected.detectionMode || (detected.preferred ? 'preferred' : 'fallback'),
+    domain: detected.domain,
+    email: detected.email,
+    localPart: detected.localPart,
+  };
+}
+
 async function handlePollEmail(step, payload) {
   const {
     senderFilters,
@@ -321,6 +508,8 @@ async function handlePollEmail(step, payload) {
   if (filterAfterMinute) {
     log(`步骤 ${step}：仅尝试 ${new Date(filterAfterMinute).toLocaleString('zh-CN', { hour12: false })} 及之后时间的邮件。`);
   }
+
+  await ensureMailListPage();
 
   let initialItems = [];
   for (let i = 0; i < 20; i++) {

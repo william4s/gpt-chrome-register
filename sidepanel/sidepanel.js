@@ -199,7 +199,7 @@ const MAIL_PROVIDER_LOGIN_CONFIGS = {
   },
   '2925': {
     label: '2925 邮箱',
-    url: 'https://2925.com/#/mailList',
+    url: 'https://www.2925.com/#/mailList',
   },
 };
 
@@ -851,7 +851,7 @@ function collectSettingsPayload() {
     hotmailLocalBaseUrl: inputHotmailLocalBaseUrl.value.trim(),
     cloudflareDomain: selectedCloudflareDomain,
     cloudflareDomains: domains,
-    autoRunSkipFailures: true,
+    autoRunSkipFailures: inputAutoSkipFailures.checked,
     autoRunFallbackThreadIntervalMinutes: normalizeAutoRunThreadIntervalMinutes(inputAutoSkipFailuresThreadIntervalMinutes.value),
     autoRunDelayEnabled: inputAutoDelayEnabled.checked,
     autoRunDelayMinutes: normalizeAutoDelayMinutes(inputAutoDelayMinutes.value),
@@ -1156,7 +1156,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
     || usesGeneratedAliasMailProvider(selectMailProvider.value)
     || isCustomEmailFullModeSelected();
   inputEmail.disabled = locked;
-  inputAutoSkipFailures.disabled = true;
+  inputAutoSkipFailures.disabled = settingsCardLocked;
 
   if (currentAutoRun.totalRuns > 0) {
     inputRunCount.value = String(currentAutoRun.totalRuns);
@@ -1264,7 +1264,7 @@ function applySettingsState(state) {
   updateStepsLayout(state);
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
   setCloudflareDomainEditMode(false, { clearInput: true });
-  inputAutoSkipFailures.checked = true;
+  inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures ?? true);
   inputAutoSkipFailuresThreadIntervalMinutes.value = String(normalizeAutoRunThreadIntervalMinutes(state?.autoRunFallbackThreadIntervalMinutes));
   inputAutoDelayEnabled.checked = Boolean(state?.autoRunDelayEnabled);
   inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(state?.autoRunDelayMinutes));
@@ -1849,8 +1849,9 @@ function updateMailProviderUI() {
   const useCustomAlias = useCustomEmail && getSelectedCustomEmailAliasMode();
   const useCustomEmailFull = useCustomEmail && !useCustomAlias;
   const useEmailGenerator = !useHotmail && !useGeneratedAlias;
+  const showEmailPrefixRow = useCustomAlias;
   updateMailLoginButtonState();
-  setDataRowVisible(rowEmailPrefix, useGeneratedAlias || useCustomAlias);
+  setDataRowVisible(rowEmailPrefix, showEmailPrefixRow);
   const hotmailServiceMode = getSelectedHotmailServiceMode();
   setDataRowVisible(rowInbucketHost, useInbucket);
   setDataRowVisible(rowInbucketMailbox, useInbucket);
@@ -1895,7 +1896,7 @@ function updateMailProviderUI() {
   const uiCopy = getEmailGeneratorUiCopy();
   inputEmail.placeholder = useHotmail
     ? '由 Hotmail 账号池自动分配'
-    : (use2925 ? '步骤 3 自动生成 2925 邮箱并回填' : uiCopy.placeholder);
+    : (use2925 ? '步骤 3 自动识别主邮箱并生成 2925 子邮箱' : uiCopy.placeholder);
   btnFetchEmail.disabled = useGeneratedAlias || useCustomEmailFull || isAutoRunLockedPhase();
   if (!btnFetchEmail.disabled) {
     btnFetchEmail.textContent = uiCopy.buttonLabel;
@@ -1904,7 +1905,7 @@ function updateMailProviderUI() {
     autoHintText.textContent = useHotmail
       ? '请先校验并选择一个 Hotmail 账号'
       : (useGeneratedAlias
-        ? '步骤 3 会自动生成邮箱，无需手动获取'
+        ? '步骤 3 会自动识别 2925 主邮箱并生成子邮箱，无需手动填写前缀'
         : (useCustomAlias
           ? '按前缀 + 随机串 + 后缀生成注册邮箱；Auto 每一轮都会重新生成随机串'
           : (useCustomEmailFull
@@ -2472,12 +2473,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
             throw new Error(response.error);
           }
         } else if (usesGeneratedAliasMailProvider(selectMailProvider.value)) {
-          const emailPrefix = inputEmailPrefix.value.trim();
-          if (!emailPrefix) {
-            showToast('请先填写 2925 邮箱前缀。', 'warn');
-            return;
-          }
-          const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, emailPrefix } });
+          const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
           if (response?.error) {
             throw new Error(response.error);
           }
@@ -2982,7 +2978,7 @@ btnAutoRun.addEventListener('click', async () => {
       payload: {
         totalRuns,
         delayMinutes,
-        autoRunSkipFailures: true,
+        autoRunSkipFailures: inputAutoSkipFailures.checked,
         mode,
       },
     });
@@ -3423,7 +3419,7 @@ chrome.runtime.onMessage.addListener((message) => {
         }
       }
       if (message.payload.autoRunSkipFailures !== undefined) {
-        inputAutoSkipFailures.checked = true;
+        inputAutoSkipFailures.checked = Boolean(message.payload.autoRunSkipFailures);
         updateFallbackThreadIntervalInputState();
       }
       if (message.payload.autoRunDelayEnabled !== undefined) {

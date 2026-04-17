@@ -3,6 +3,7 @@ const fs = require('fs');
 
 const backgroundSource = fs.readFileSync('background.js', 'utf8');
 const signupPageSource = fs.readFileSync('content/signup-page.js', 'utf8');
+const mail2925Source = fs.readFileSync('content/mail-2925.js', 'utf8');
 
 function extractFunctionFromSource(sourceText, name) {
   const markers = [`async function ${name}(`, `function ${name}(`];
@@ -57,6 +58,10 @@ function extractFunction(name) {
 
 function extractSignupPageFunction(name) {
   return extractFunctionFromSource(signupPageSource, name);
+}
+
+function extractMail2925Function(name) {
+  return extractFunctionFromSource(mail2925Source, name);
 }
 
 async function testPollFreshVerificationCodeRethrowsStop() {
@@ -360,12 +365,96 @@ return {
   assert.strictEqual(state.sleepCalls, 2, '应在页面切换期内继续轮询，而不是直接失败');
 }
 
+async function testIsPostSignupSuccessPageAcceptsChatGptLandingWhenWindowStateAffectsVisibility() {
+  const bundle = [
+    extractSignupPageFunction('isChatGptAppLandingPage'),
+    extractSignupPageFunction('isPostSignupSuccessPage'),
+  ].join('\n');
+
+  const api = new Function(`
+const location = {
+  hostname: 'chatgpt.com',
+  pathname: '/',
+};
+
+function hasExitedStep5Form() {
+  return true;
+}
+function getPageTextSnapshot() {
+  return 'ChatGPT 可以帮助你写作 编程 总结 更多内容';
+}
+function isAddPhonePageReady() {
+  return false;
+}
+function isStep8Ready() {
+  return false;
+}
+function isPostSignupOnboardingPage() {
+  return false;
+}
+
+${bundle}
+
+return {
+  isChatGptAppLandingPage,
+  isPostSignupSuccessPage,
+};
+`)();
+
+  assert.strictEqual(
+    api.isChatGptAppLandingPage(),
+    true,
+    'chatgpt.com 落地页在已离开 step5 form 后应被识别为成功落地页'
+  );
+  assert.strictEqual(
+    api.isPostSignupSuccessPage(),
+    true,
+    '即使窗口状态影响可见元素判断，A5 READY 重放到 chatgpt.com 落地页也应直接按成功处理'
+  );
+}
+
+async function testMail2925SeenMailKeyIncludesMailContentBeyondItemId() {
+  const bundle = [
+    extractMail2925Function('normalizeMailIdentityPart'),
+    extractMail2925Function('buildSeenMailKey'),
+  ].join('\n');
+
+  const api = new Function(`
+${bundle}
+
+return {
+  buildSeenMailKey,
+};
+`)();
+
+  const firstKey = api.buildSeenMailKey({
+    itemId: 'row-1',
+    itemTimestamp: 1710000000000,
+    text: '你的 ChatGPT 代码为 123456',
+    code: '123456',
+  });
+  const secondKey = api.buildSeenMailKey({
+    itemId: 'row-1',
+    itemTimestamp: 1710000060000,
+    text: '你的 ChatGPT 代码为 654321',
+    code: '654321',
+  });
+
+  assert.notStrictEqual(
+    firstKey,
+    secondKey,
+    '2925 邮箱即使复用了同一个 itemId，只要新邮件时间或验证码变化，就不应被视为同一封已处理邮件'
+  );
+}
+
 (async () => {
   await testPollFreshVerificationCodeRethrowsStop();
   await testResolveVerificationStepRethrowsStopFromFreshRequest();
   await testWaitForVerificationSubmitOutcomeReturnsRestartCurrentAttempt();
   await testWaitForSignupEmailInputOrLaterStateRecognizesAdvancedVerificationPage();
   await testWaitForSignupPasswordInputOrLaterStateRecognizesAdvancedVerificationPage();
+  await testIsPostSignupSuccessPageAcceptsChatGptLandingWhenWindowStateAffectsVisibility();
+  await testMail2925SeenMailKeyIncludesMailContentBeyondItemId();
   console.log('verification stop propagation tests passed');
 })().catch((error) => {
   console.error(error);

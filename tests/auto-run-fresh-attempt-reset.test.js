@@ -58,6 +58,7 @@ const bundle = [
   extractFunction('getErrorMessage'),
   extractFunction('isRestartCurrentAttemptError'),
   extractFunction('normalizeRegistrationMode'),
+  extractFunction('shouldRefreshOAuthBeforeStep6'),
   extractFunction('getOrderedStepIds'),
   extractFunction('getFirstUnfinishedStep'),
   extractFunction('hasSavedProgress'),
@@ -255,6 +256,7 @@ ${bundle}
 return {
   autoRunLoop,
   isRestartCurrentAttemptError,
+  shouldRefreshOAuthBeforeStep6,
   snapshot() {
     return {
       runCalls,
@@ -280,6 +282,21 @@ return {
     api.isRestartCurrentAttemptError(new Error('当前邮箱已存在，需要重新开始新一轮。')),
     true,
     '邮箱已存在分支仍应触发整轮重开'
+  );
+  assert.strictEqual(
+    api.shouldRefreshOAuthBeforeStep6({ registrationMode: 'gpt', oauthUrl: 'https://auth.openai.com/authorize?state=abc' }),
+    false,
+    'GPT 模式在已有 oauthUrl 时不应在步骤 6 前再次刷新'
+  );
+  assert.strictEqual(
+    api.shouldRefreshOAuthBeforeStep6({ registrationMode: 'gpt', oauthUrl: '' }),
+    true,
+    'GPT 模式若缺少 oauthUrl，步骤 6 仍应回退刷新'
+  );
+  assert.strictEqual(
+    api.shouldRefreshOAuthBeforeStep6({ registrationMode: 'oauth', oauthUrl: 'https://auth.openai.com/authorize?state=abc' }),
+    true,
+    '老 OAuth 模式仍应保留步骤 6 前刷新逻辑'
   );
 
   await api.autoRunLoop(2, { autoRunSkipFailures: false, mode: 'restart' });

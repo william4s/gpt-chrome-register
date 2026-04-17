@@ -231,7 +231,7 @@ function findLabeledAuthPasswordInput() {
   return null;
 }
 
-async function waitForVisibleAuthPasswordInput(timeout = 15000) {
+async function waitForVisibleAuthPasswordInput(timeout = 30000) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -256,7 +256,7 @@ function isSignupStatePastPasswordStep(state) {
   return state === 'verification' || state === 'step5' || state === 'email_exists';
 }
 
-async function waitForSignupEmailInputOrLaterState(timeout = 15000) {
+async function waitForSignupEmailInputOrLaterState(timeout = 30000) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -288,7 +288,7 @@ async function waitForSignupEmailInputOrLaterState(timeout = 15000) {
   return finalSnapshot;
 }
 
-async function waitForSignupPasswordInputOrLaterState(timeout = 15000) {
+async function waitForSignupPasswordInputOrLaterState(timeout = 30000) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -470,7 +470,7 @@ function findWelcomeDialogSignupTrigger() {
   return null;
 }
 
-async function waitForSignupEmailInput(timeout = 8000) {
+async function waitForSignupEmailInput(timeout = 15000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     throwIfStopped();
@@ -714,7 +714,7 @@ async function stepA1_logoutAndOpenSignup() {
       await humanPause(450, 1200);
       simulateClick(registerBtn);
       log(`步骤 A1：已点击首页注册入口：${actionText}`);
-      const emailReady = await waitForSignupEmailInput(8000);
+      const emailReady = await waitForSignupEmailInput(15000);
       if (emailReady) {
         log('步骤 A1：点击后已进入注册邮箱页。', 'ok');
         reportComplete('A1');
@@ -742,7 +742,7 @@ async function stepA2_fillSignupEmail(payload) {
 
   log(`步骤 A2：正在填写注册邮箱：${email}`);
 
-  const emailStage = await waitForSignupEmailInputOrLaterState(15000);
+  const emailStage = await waitForSignupEmailInputOrLaterState(30000);
   if (isSignupStatePastEmailStep(emailStage.state)) {
     log('步骤 A2：等待期间页面已越过邮箱页，本步骤按已完成处理。', 'ok');
     reportComplete('A2', { email });
@@ -758,7 +758,7 @@ async function stepA2_fillSignupEmail(payload) {
   fillInput(emailInput, email);
   log('步骤 A2：邮箱已填写');
 
-  const submitBtn = await getAuthSubmitButton(5000);
+  const submitBtn = await getAuthSubmitButton(10000);
   if (!submitBtn) {
     throw new Error('未找到注册邮箱提交按钮。URL: ' + location.href);
   }
@@ -768,7 +768,7 @@ async function stepA2_fillSignupEmail(payload) {
   simulateClick(submitBtn);
   log('步骤 A2：邮箱已提交，正在等待密码页...');
 
-  const postSubmitState = await waitForSignupEmailStepResult(10000);
+  const postSubmitState = await waitForSignupEmailStepResult(20000);
   if (isSignupStatePastEmailStep(postSubmitState.state)) {
     log('步骤 A2：提交后已进入下一阶段。', 'ok');
     reportComplete('A2', { email });
@@ -778,7 +778,7 @@ async function stepA2_fillSignupEmail(payload) {
   throw new Error('提交邮箱后仍未进入密码页。URL: ' + location.href);
 }
 
-async function waitForSignupEmailStepResult(timeout = 10000) {
+async function waitForSignupEmailStepResult(timeout = 20000) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -795,7 +795,7 @@ async function waitForSignupEmailStepResult(timeout = 10000) {
   return inspectSignupVerificationState();
 }
 
-async function waitForSignupPasswordSubmitResult(timeout = 10000) {
+async function waitForSignupPasswordSubmitResult(timeout = 20000) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
@@ -824,7 +824,7 @@ async function stepA3_fillSignupPassword(payload) {
   }
 
   log('步骤 A3：正在填写注册密码...');
-  const passwordStage = await waitForSignupPasswordInputOrLaterState(15000);
+  const passwordStage = await waitForSignupPasswordInputOrLaterState(30000);
   if (isSignupStatePastPasswordStep(passwordStage.state)) {
     log('步骤 A3：等待期间页面已越过密码页，本步骤按已完成处理。', 'ok');
     reportComplete('A3', { signupVerificationRequestedAt: Date.now() });
@@ -841,7 +841,7 @@ async function stepA3_fillSignupPassword(payload) {
   log('步骤 A3：密码已填写');
 
   const submitBtn = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 5000).catch(() => null);
+    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 10000).catch(() => null);
   if (!submitBtn) {
     throw new Error('未找到注册密码提交按钮。URL: ' + location.href);
   }
@@ -852,7 +852,7 @@ async function stepA3_fillSignupPassword(payload) {
   simulateClick(submitBtn);
   log('步骤 A3：密码已提交，正在等待验证码页...');
 
-  const postSubmitState = await waitForSignupPasswordSubmitResult(10000);
+  const postSubmitState = await waitForSignupPasswordSubmitResult(20000);
   if (postSubmitState.state === 'verification' || postSubmitState.state === 'step5' || postSubmitState.state === 'email_exists') {
     if (postSubmitState.state === 'email_exists') {
       log('步骤 A3：提交后进入账号已存在状态，交由步骤 A4 自动恢复。', 'warn');
@@ -878,12 +878,12 @@ async function step2_clickRegister() {
     registerBtn = await waitForElementByText(
       'a, button, [role="button"], [role="link"]',
       /sign\s*up|register|create\s*account|注册/i,
-      10000
+      20000
     );
   } catch {
     // Some pages may have a direct link
     try {
-      registerBtn = await waitForElement('a[href*="signup"], a[href*="register"]', 5000);
+      registerBtn = await waitForElement('a[href*="signup"], a[href*="register"]', 10000);
     } catch {
       throw new Error(
         '未找到注册按钮。' +
@@ -913,7 +913,7 @@ async function step3_fillEmailPassword(payload) {
   try {
     emailInput = await waitForElement(
       'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email"], input[placeholder*="Email"]',
-      10000
+      20000
     );
   } catch {
     throw new Error('在注册页未找到邮箱输入框。URL: ' + location.href);
@@ -930,7 +930,7 @@ async function step3_fillEmailPassword(payload) {
     // Need to submit email first to get to password page
     log('步骤 3：暂未发现密码输入框，先提交邮箱...');
     const submitBtn = document.querySelector('button[type="submit"]')
-      || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
+      || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 10000).catch(() => null);
 
     if (submitBtn) {
       await humanPause(400, 1100);
@@ -940,7 +940,7 @@ async function step3_fillEmailPassword(payload) {
     }
 
     try {
-      passwordInput = await waitForVisibleAuthPasswordInput(10000);
+      passwordInput = await waitForVisibleAuthPasswordInput(30000);
     } catch {
       throw new Error('提交邮箱后仍未找到密码输入框。URL: ' + location.href);
     }
@@ -952,7 +952,7 @@ async function step3_fillEmailPassword(payload) {
   log('步骤 3：密码已填写');
 
   const submitBtn = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 5000).catch(() => null);
+    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 10000).catch(() => null);
 
   // Report complete BEFORE submit, because submit causes page navigation
   // which kills the content script connection
@@ -979,6 +979,8 @@ const OAUTH_CONSENT_FORM_SELECTOR = 'form[action*="/sign-in-with-chatgpt/" i][ac
 const CONTINUE_ACTION_PATTERN = /继续|continue/i;
 const ADD_PHONE_PAGE_PATTERN = /add[\s-]*phone|添加手机号|手机号码|手机号|phone\s+number|telephone/i;
 const STEP5_SUBMIT_ERROR_PATTERN = /无法根据该信息创建帐户|请重试|unable\s+to\s+create\s+(?:your\s+)?account|couldn'?t\s+create\s+(?:your\s+)?account|something\s+went\s+wrong|invalid\s+(?:birthday|birth|date)|生日|出生日期/i;
+const STEP5_OPTIONAL_CONSENT_ALL_PATTERN = /我同意以下所有各项|我同意以下所有各項|同意以下所有各项|同意以下所有各項|i\s+agree\s+to\s+all(?:\s+of\s+the\s+following)?/i;
+const STEP5_CONSENT_CONTROL_SELECTOR = 'input[type="checkbox"], [role="checkbox"]';
 const AUTH_TIMEOUT_ERROR_TITLE_PATTERN = /糟糕，出错了|something\s+went\s+wrong|oops/i;
 const AUTH_TIMEOUT_ERROR_DETAIL_PATTERN = /operation\s+timed\s+out|timed\s+out|请求超时|操作超时/i;
 const AUTH_MAX_CHECK_ATTEMPTS_ERROR_PATTERN = /max_check_attempts|验证过程中出错|error\s+during\s+verification|verification\s+process/i;
@@ -1128,8 +1130,26 @@ function hasExitedStep5Form() {
     && !isSignupPasswordPage();
 }
 
+function isChatGptAppLandingPage() {
+  const hostname = String(location.hostname || '').trim().toLowerCase();
+  const pathname = String(location.pathname || '').trim().toLowerCase();
+  if (!/(^|\.)chatgpt\.com$/i.test(hostname)) {
+    return false;
+  }
+
+  if (/^\/auth(?:[/?#]|$)/i.test(pathname)) {
+    return false;
+  }
+
+  if (!hasExitedStep5Form()) {
+    return false;
+  }
+
+  return getPageTextSnapshot().length >= 20;
+}
+
 function isPostSignupSuccessPage() {
-  if (isAddPhonePageReady() || isStep8Ready() || isPostSignupOnboardingPage()) {
+  if (isAddPhonePageReady() || isStep8Ready() || isPostSignupOnboardingPage() || isChatGptAppLandingPage()) {
     return true;
   }
 
@@ -1236,6 +1256,88 @@ function getStep5ErrorText() {
   }
 
   return messages.find((text) => STEP5_SUBMIT_ERROR_PATTERN.test(text)) || '';
+}
+
+function getStep5CheckableState(el) {
+  if (!el) return false;
+  if (typeof el.checked === 'boolean') {
+    return el.checked;
+  }
+
+  const ariaChecked = el.getAttribute?.('aria-checked');
+  if (ariaChecked === 'true') return true;
+  if (ariaChecked === 'false') return false;
+
+  const dataState = String(el.getAttribute?.('data-state') || '').trim().toLowerCase();
+  if (dataState === 'checked') return true;
+  if (dataState === 'unchecked') return false;
+
+  return false;
+}
+
+function findVisibleStep5ConsentCheckableWithin(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') {
+    return null;
+  }
+
+  return Array.from(root.querySelectorAll(STEP5_CONSENT_CONTROL_SELECTOR))
+    .find((el) => isVisibleElement(el) && isActionEnabled(el)) || null;
+}
+
+function findStep5OptionalConsentAllControl() {
+  const candidates = document.querySelectorAll('label, div, section, article, li, p, span');
+
+  for (const el of candidates) {
+    if (!isVisibleElement(el)) continue;
+
+    const text = normalizeInlineText(getActionText(el));
+    if (!text || !STEP5_OPTIONAL_CONSENT_ALL_PATTERN.test(text)) continue;
+
+    const directToggle = findVisibleStep5ConsentCheckableWithin(el);
+    if (directToggle) {
+      const labelTarget = typeof directToggle.closest === 'function'
+        ? directToggle.closest('label')
+        : null;
+      return {
+        toggle: directToggle,
+        clickTarget: labelTarget && isVisibleElement(labelTarget) ? labelTarget : directToggle,
+        matchedText: text,
+      };
+    }
+
+    const labelTarget = typeof el.closest === 'function'
+      ? el.closest('label')
+      : null;
+    if (labelTarget && isVisibleElement(labelTarget) && isActionEnabled(labelTarget)) {
+      return {
+        toggle: findVisibleStep5ConsentCheckableWithin(labelTarget),
+        clickTarget: labelTarget,
+        matchedText: text,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function ensureStep5OptionalConsentAllAccepted(stepId) {
+  const control = findStep5OptionalConsentAllControl();
+  if (!control) {
+    return false;
+  }
+
+  if (getStep5CheckableState(control.toggle || control.clickTarget)) {
+    log(`步骤 ${stepId}：检测到“我同意以下所有各项”已勾选，继续提交。`);
+    return true;
+  }
+
+  await humanPause(250, 650);
+  simulateClick(control.clickTarget);
+  await sleep(150);
+
+  const checked = getStep5CheckableState(control.toggle || control.clickTarget);
+  log(`步骤 ${stepId}：${checked ? '已勾选' : '已尝试勾选'}“我同意以下所有各项”。`);
+  return checked || Boolean(control.clickTarget);
 }
 
 async function waitForStep5SubmitOutcome(timeout = 15000, options = {}) {
@@ -1689,7 +1791,7 @@ async function step6_login(payload) {
   try {
     emailInput = await waitForElement(
       'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email" i], input[placeholder*="Email"]',
-      15000
+      30000
     );
   } catch {
     throw new Error('在登录页未找到邮箱输入框。URL: ' + location.href);
@@ -1702,7 +1804,7 @@ async function step6_login(payload) {
   // Submit email
   await sleep(500);
   const submitBtn1 = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
+    || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 10000).catch(() => null);
   if (submitBtn1) {
     await humanPause(400, 1100);
     simulateClick(submitBtn1);
@@ -1738,7 +1840,7 @@ async function step6_login(payload) {
 
     await sleep(500);
     const submitBtn2 = document.querySelector('button[type="submit"]')
-      || await waitForElementByText('button', /continue|log\s*in|submit|sign\s*in|登录|继续/i, 5000).catch(() => null);
+      || await waitForElementByText('button', /continue|log\s*in|submit|sign\s*in|登录|继续/i, 10000).catch(() => null);
     // Report complete BEFORE submit in case page navigates
     reportComplete(6, { needsOTP: true });
 
@@ -1969,7 +2071,7 @@ async function step5_fillNameBirthday(payload, stepLabel = '5') {
   try {
     nameInput = await waitForElement(
       'input[name="name"], input[placeholder*="全名"], input[autocomplete="name"]',
-      10000
+      30000
     );
   } catch {
     throw new Error('未找到姓名输入框。URL: ' + location.href);
@@ -1991,7 +2093,7 @@ async function step5_fillNameBirthday(payload, stepLabel = '5') {
   let visibleBirthdaySpinners = false;
   let visibleBirthdaySelects = false;
 
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 200; i++) {
     yearSpinner = document.querySelector('[role="spinbutton"][data-type="year"]');
     monthSpinner = document.querySelector('[role="spinbutton"][data-type="month"]');
     daySpinner = document.querySelector('[role="spinbutton"][data-type="day"]');
@@ -2119,8 +2221,9 @@ async function step5_fillNameBirthday(payload, stepLabel = '5') {
 
   // Click "完成帐户创建" button
   await sleep(500);
+  await ensureStep5OptionalConsentAllAccepted(stepId);
   const completeBtn = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /完成|create|continue|finish|done|agree/i, 5000).catch(() => null);
+    || await waitForElementByText('button', /完成|create|continue|finish|done|agree/i, 10000).catch(() => null);
   if (!completeBtn) {
     throw new Error('未找到“完成帐户创建”按钮。URL: ' + location.href);
   }
@@ -2130,7 +2233,7 @@ async function step5_fillNameBirthday(payload, stepLabel = '5') {
   simulateClick(completeBtn);
   log(`步骤 ${stepId}：已点击“完成帐户创建”，正在等待页面结果...`);
 
-  const outcome = await waitForStep5SubmitOutcome(15000, { successGraceMs: 5000, initialUrl: submitUrl });
+  const outcome = await waitForStep5SubmitOutcome(30000, { successGraceMs: 8000, initialUrl: submitUrl });
   if (outcome.invalidProfile) {
     throw new Error(`步骤 ${stepId}：${outcome.errorText}`);
   }

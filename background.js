@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'hotmail-utils.js', 'content/activation-utils.js');
+importScripts('data/names.js', 'shared/mail-2925.js', 'shared/verification-mail-return.js', 'hotmail-utils.js', 'content/activation-utils.js');
 
 const {
   buildHotmailMailApiLatestUrl,
@@ -18,11 +18,20 @@ const {
   shouldClearHotmailCurrentSelection,
 } = self.HotmailUtils;
 const {
+  build2925ChildEmail = () => null,
+  is2925ChildEmailForMain = () => false,
+  parse2925MainEmail = () => null,
+} = self.MultiPage2925Mail || {};
+const {
+  getMailReturnBehaviorAfterResend = () => ({ mode: 'activate', reloadIfSameUrl: false }),
+} = self.MultiPageVerificationMailReturn || {};
+const {
   isRecoverableStep9AuthFailure,
 } = self.MultiPageActivationUtils;
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
+const MAIL_2925_URL = 'https://www.2925.com/#/mailList';
 const HOTMAIL_PROVIDER = 'hotmail-api';
 const HOTMAIL_MAILBOXES = ['INBOX', 'Junk'];
 const STOP_ERROR_MESSAGE = '流程已被用户停止。';
@@ -102,6 +111,7 @@ const DEFAULT_STATE = {
   stepStatuses: { ...DEFAULT_STEP_STATUSES },
   oauthUrl: null, // 运行时抓取到的 OAuth 地址，不要手动预填。
   email: null, // 运行时邮箱，由程序自动获取并写入，不能手动预填。
+  mail2925MainEmail: '', // 2925 主邮箱，运行时自动识别后写入。
   password: null, // 运行时实际密码，由 customPassword 或程序自动生成后写入。
   accounts: [], // 已生成账号记录：{ email, password, createdAt }。
   lastEmailTimestamp: null, // 最近一次获取到邮箱数据的运行时时间戳。
@@ -560,6 +570,12 @@ async function setEmailState(email) {
   }
 }
 
+async function set2925MainEmailState(mail2925MainEmail) {
+  const value = String(mail2925MainEmail || '').trim();
+  await setState({ mail2925MainEmail: value });
+  broadcastDataUpdate({ mail2925MainEmail: value });
+}
+
 async function setPasswordState(password) {
   await setState({ password });
   broadcastDataUpdate({ password });
@@ -570,11 +586,13 @@ async function resetState() {
   // Preserve settings and persistent data across resets
   const [prev, persistedSettings] = await Promise.all([
     chrome.storage.session.get([
+      'seen2925MailKeys',
       'seen163MailKeys',
       'seenInbucketMailIds',
       'accounts',
       'tabRegistry',
       'sourceLastUrls',
+      'mail2925MainEmail',
     ]),
     getPersistedSettings(),
   ]);
@@ -582,11 +600,13 @@ async function resetState() {
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
     ...persistedSettings,
+    seen2925MailKeys: prev.seen2925MailKeys || [],
     seen163MailKeys: prev.seen163MailKeys || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     sourceLastUrls: prev.sourceLastUrls || {},
+    mail2925MainEmail: prev.mail2925MainEmail || '',
   });
 }
 
@@ -3156,7 +3176,18 @@ async function handleMessage(message, sender) {
       if (isAutoRunLockedState(state)) {
         throw new Error('自动流程运行中，当前不能手动获取邮箱。');
       }
-      const email = await fetchGeneratedEmail(state, { ...(message.payload || {}), generator: 'duck' });
+      const email = await fetchDuckEmail(message.payload || {});
+      await resumeAutoRun();
+      return { ok: true, email };
+    }
+
+    case 'FETCH_2925_EMAIL': {
+      clearStopRequest();
+      const state = await getState();
+      if (isAutoRunLockedState(state)) {
+        throw new Error('自动流程运行中，当前不能手动获取 2925 邮箱。');
+      }
+      const email = await fetch2925ChildEmail(message.payload || {});
       await resumeAutoRun();
       return { ok: true, email };
     }
@@ -3664,8 +3695,82 @@ async function fetchDuckEmail(options = {}) {
   return result.email;
 }
 
+async function fetch2925MainEmailFromPage() {
+  throwIfStopped();
+  await addLog('2925 邮箱：正在打开 2925 页面识别主邮箱...', 'info');
+  await reuseOrCreateTab('mail-2925', MAIL_2925_URL, {
+    reloadIfSameUrl: true,
+    inject: ['content/utils.js', 'shared/mail-2925.js', 'content/mail-2925.js'],
+    injectSource: 'mail-2925',
+  });
+
+  const result = await sendToContentScriptResilient(
+    'mail-2925',
+    {
+      type: 'FETCH_2925_MAIN_EMAIL',
+      source: 'background',
+      payload: {},
+    },
+    {
+      timeoutMs: 30000,
+      retryDelayMs: 700,
+      logMessage: '2925 页面正在切换，等待收件箱重新就绪后继续识别主邮箱...',
+    }
+  );
+
+  if (!result) {
+    throw new Error('未检测到 2925 主邮箱，请先登录 2925 邮箱并打开收件箱页面。');
+  }
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+
+  const mainMailbox = parse2925MainEmail(result?.email || '');
+  if (!mainMailbox?.email) {
+    throw new Error('当前页面未识别到有效的 2925 主邮箱，请确认页面已完全加载后重试。');
+  }
+
+  await set2925MainEmailState(mainMailbox.email);
+
+  if (result?.detectionMode === 'fallback') {
+    await addLog(`2925 邮箱：未识别到当前账号区域，已回退使用第一个合法主邮箱 ${mainMailbox.email}`, 'warn');
+  } else {
+    await addLog(`2925 邮箱：已识别主邮箱 ${mainMailbox.email}`, 'ok');
+  }
+
+  return {
+    ...mainMailbox,
+    detectionMode: result?.detectionMode || 'preferred',
+  };
+}
+
+async function fetch2925ChildEmail(options = {}) {
+  throwIfStopped();
+  const state = await getState();
+  const knownMainMailbox = parse2925MainEmail(options.mainEmail || state.mail2925MainEmail || '');
+  const mainMailbox = knownMainMailbox || await fetch2925MainEmailFromPage();
+
+  if (state.email && is2925ChildEmailForMain(state.email, mainMailbox.email)) {
+    await addLog(`2925 邮箱：复用现有子邮箱 ${state.email}`, 'info');
+    return state.email;
+  }
+
+  const result = build2925ChildEmail(mainMailbox.email);
+  if (!result?.childEmail) {
+    throw new Error('2925 主邮箱获取失败，无法生成子邮箱。');
+  }
+
+  await set2925MainEmailState(mainMailbox.email);
+  await setEmailState(result.childEmail);
+  await addLog(`2925 邮箱：已基于主邮箱 ${mainMailbox.email} 生成子邮箱 ${result.childEmail}`, 'ok');
+  return result.childEmail;
+}
+
 async function fetchGeneratedEmail(state, options = {}) {
   const currentState = state || await getState();
+  if (currentState.mailProvider === '2925') {
+    return fetch2925ChildEmail(options);
+  }
   const generator = normalizeEmailGenerator(options.generator ?? currentState.emailGenerator);
   if (generator === 'custom') {
     if (!isCustomAliasMode(currentState)) {
@@ -3745,10 +3850,7 @@ async function ensureAutoEmailReady(targetRun, totalRuns, attemptRuns) {
   }
 
   if (isGeneratedAliasProvider(currentState.mailProvider)) {
-    if (!currentState.emailPrefix) {
-      throw new Error('2925 邮箱前缀未设置，请先在侧边栏填写。');
-    }
-    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：2925 模式已启用，将在步骤 3 自动生成邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
+    await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：2925 模式已启用，将在步骤 3 自动识别主邮箱并生成子邮箱（第 ${attemptRuns} 次尝试）===`, 'info');
     return null;
   }
 
@@ -4772,7 +4874,7 @@ async function resolveRegistrationEmail(state) {
     });
     resolvedEmail = account.email;
   } else if (isGeneratedAliasProvider(state.mailProvider)) {
-    resolvedEmail = buildGeneratedAliasEmail(state);
+    resolvedEmail = await fetch2925ChildEmail();
   } else if (isCustomAliasMode(state) && !doesCustomAliasEmailMatchTemplate(state, resolvedEmail)) {
     resolvedEmail = buildGeneratedAliasEmail(state);
   }
@@ -4964,6 +5066,7 @@ async function executeSignupVerificationStep(state, stepId = '4', options = {}) 
         await reuseOrCreateTab(mail.source, mail.url, {
           inject: mail.inject,
           injectSource: mail.injectSource,
+          reloadIfSameUrl: Boolean(mail.reloadIfSameUrl),
         });
       } else {
         const tabId = await getTabId(mail.source);
@@ -4973,6 +5076,7 @@ async function executeSignupVerificationStep(state, stepId = '4', options = {}) 
       await reuseOrCreateTab(mail.source, mail.url, {
         inject: mail.inject,
         injectSource: mail.injectSource,
+        reloadIfSameUrl: Boolean(mail.reloadIfSameUrl),
       });
     }
   }
@@ -5019,9 +5123,11 @@ function getMailConfig(state) {
   if (provider === '2925') {
     return {
       source: 'mail-2925',
-      url: 'https://2925.com/#/mailList',
+      url: MAIL_2925_URL,
       label: '2925 邮箱',
-      inject: ['content/utils.js', 'content/mail-2925.js'],
+      navigateOnReuse: true,
+      reloadIfSameUrl: true,
+      inject: ['content/utils.js', 'shared/mail-2925.js', 'content/mail-2925.js'],
       injectSource: 'mail-2925',
     };
   }
@@ -5113,6 +5219,29 @@ async function requestVerificationCodeResend(step) {
   return Date.now();
 }
 
+async function returnToMailPageAfterResend(step, mail) {
+  if (!mail?.source || !mail?.url) {
+    return;
+  }
+
+  const behavior = getMailReturnBehaviorAfterResend(mail);
+  await addLog(`步骤 ${step}：重新发送后，正在返回${mail.label}继续收件...`, 'info');
+
+  if (behavior.mode === 'navigate') {
+    await reuseOrCreateTab(mail.source, mail.url, {
+      inject: mail.inject,
+      injectSource: mail.injectSource,
+      reloadIfSameUrl: Boolean(behavior.reloadIfSameUrl),
+    });
+    return;
+  }
+
+  const tabId = await getTabId(mail.source);
+  if (tabId) {
+    await chrome.tabs.update(tabId, { active: true });
+  }
+}
+
 async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) {
   if (mail.provider === HOTMAIL_PROVIDER) {
     const hotmailPollConfig = getHotmailVerificationPollConfig(step);
@@ -5140,6 +5269,7 @@ async function pollFreshVerificationCode(step, state, mail, pollOverrides = {}) 
     throwIfStopped();
     if (round > 1) {
       await requestVerificationCodeResend(step);
+      await returnToMailPageAfterResend(step, mail);
     }
 
     const payload = getVerificationPollPayload(step, state, {
@@ -5239,6 +5369,7 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
   if (requestFreshCodeFirst) {
     try {
       await requestVerificationCodeResend(step);
+      await returnToMailPageAfterResend(step, mail);
       await addLog(`步骤 ${step}：已先请求一封新的${getVerificationCodeLabel(step)}验证码，再开始轮询邮箱。`, 'warn');
     } catch (err) {
       if (isStopError(err) || (isLoginVerificationStep(step) && isStep7RestartFromStep6Error(err))) {
@@ -5276,6 +5407,7 @@ async function resolveVerificationStep(step, state, mail, options = {}) {
       }
 
       await requestVerificationCodeResend(step);
+      await returnToMailPageAfterResend(step, mail);
       await addLog(`步骤 ${step}：提交失败后已请求新验证码（${attempt + 1}/${maxSubmitAttempts}）...`, 'warn');
       continue;
     }
@@ -5348,14 +5480,26 @@ async function refreshOAuthUrlBeforeStep6(state) {
   return latestState.oauthUrl;
 }
 
+function shouldRefreshOAuthBeforeStep6(state = {}) {
+  return normalizeRegistrationMode(state.registrationMode) !== REGISTRATION_MODE_GPT
+    || !String(state.oauthUrl || '').trim();
+}
+
 async function executeStep6(state) {
   if (!state.email) {
     throw new Error('缺少邮箱地址，请先完成步骤 3。');
   }
 
-  const oauthUrl = await refreshOAuthUrlBeforeStep6(state);
+  const shouldRefreshOAuth = shouldRefreshOAuthBeforeStep6(state);
+  const oauthUrl = shouldRefreshOAuth
+    ? await refreshOAuthUrlBeforeStep6(state)
+    : String(state.oauthUrl || '').trim();
 
-  await addLog('步骤 6：正在打开最新 OAuth 链接并登录...');
+  await addLog(
+    shouldRefreshOAuth
+      ? '步骤 6：正在打开最新 OAuth 链接并登录...'
+      : '步骤 6：GPT 模式复用当前 OAuth 链接并登录...'
+  );
   // Reuse the signup-page tab — navigate it to the OAuth URL
   await reuseOrCreateTab('signup-page', oauthUrl);
 
@@ -5416,23 +5560,25 @@ async function runStep7Attempt(state) {
   } else {
     await addLog(`步骤 7：正在打开${mail.label}...`);
 
-    const alive = await isTabAlive(mail.source);
-    if (alive) {
-      if (mail.navigateOnReuse) {
-        await reuseOrCreateTab(mail.source, mail.url, {
-          inject: mail.inject,
-          injectSource: mail.injectSource,
-        });
-      } else {
-        const tabId = await getTabId(mail.source);
-        await chrome.tabs.update(tabId, { active: true });
-      }
-    } else {
+  const alive = await isTabAlive(mail.source);
+  if (alive) {
+    if (mail.navigateOnReuse) {
       await reuseOrCreateTab(mail.source, mail.url, {
         inject: mail.inject,
         injectSource: mail.injectSource,
+        reloadIfSameUrl: Boolean(mail.reloadIfSameUrl),
       });
+    } else {
+      const tabId = await getTabId(mail.source);
+      await chrome.tabs.update(tabId, { active: true });
     }
+  } else {
+    await reuseOrCreateTab(mail.source, mail.url, {
+      inject: mail.inject,
+      injectSource: mail.injectSource,
+      reloadIfSameUrl: Boolean(mail.reloadIfSameUrl),
+    });
+  }
   }
 
   await resolveVerificationStep(7, state, mail, {
