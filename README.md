@@ -13,24 +13,6 @@
 - Step 5 同时兼容 `birthday`、`age` 和可选的“我同意以下所有各项”勾选框
 - 支持 `Auto` 多轮运行、暂停恢复、导入导出配置和失败重试
 
-## 运行截图
-
-最新自动化运行日志示意：
-
-<p align="center">
-  <img src="docs/images/十轮自动.png" alt="自动化运行日志" width="100%" />
-</p>
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=william4s%2Fgpt-chrome-register&type=timeline&logscale&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=william4s/gpt-chrome-register&type=timeline&logscale&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=william4s/gpt-chrome-register&type=timeline&logscale&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=william4s/gpt-chrome-register&type=timeline&logscale&legend=top-left" />
-  </picture>
-</a>
-
 ## 当前能力
 
 - 从 CPA 面板自动获取 OpenAI OAuth 授权链接
