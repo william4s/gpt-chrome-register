@@ -2,7 +2,7 @@
 
 一个用于批量跑通 ChatGPT / OpenAI OAuth 注册、登录与回调验证流程的 Chrome 扩展。
 
-当前版本以侧边栏为控制中心，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / QQ / 163 / Inbucket / Hotmail 协助获取验证码。
+当前版本以侧边栏为控制中心，支持单步执行、整套自动执行、停止当前流程、保存常用配置，以及通过 DuckDuckGo / 2925 / QQ / 163 / Inbucket / Hotmail 协助获取验证码。
 
 ## 项目概览
 
@@ -41,8 +41,9 @@
 - 至少准备一种验证码接收方式：
   - DuckDuckGo `@duck.com` + QQ / 163 / Inbucket 转发
   - Cloudflare 自定义域邮箱前缀 + QQ / 163 / Inbucket 转发
+  - 2925邮箱
   - 手动填写一个可收信邮箱
-- 如果使用 `QQ` / `163` / `Inbucket`，对应页面需要提前能正常打开
+- 如果使用 `QQ` / `163` / `Inbucket` / `2925`，对应页面需要提前能正常打开
 
 ## 安装
 
